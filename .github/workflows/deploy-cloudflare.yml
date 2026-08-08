@@ -26,6 +26,23 @@ jobs:
         working-directory: serverless
         run: npm install --no-audit --no-fund
 
+      - name: Check Cloudflare credentials
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CF_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN is missing"
+            exit 1
+          fi
+
+          if [ -z "$CF_ACCOUNT" ]; then
+            echo "CLOUDFLARE_ACCOUNT_ID is missing"
+            exit 1
+          fi
+
+          echo "Cloudflare credentials are available"
+
       - name: Deploy Worker + Frontend
         working-directory: serverless
         env:
