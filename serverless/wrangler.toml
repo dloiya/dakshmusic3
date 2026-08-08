@@ -1,0 +1,19 @@
+name = "personal-music-server"
+main = "worker.js"
+compatibility_date = "2026-07-01"
+
+[vars]
+ENVIRONMENT = "production"
+GENERAL_CACHE_LIMIT = "25"
+MAX_ALBUM_SESSIONS = "5"
+DEVICE_CACHE_LIMIT = "10"
+DEEZER_API = "https://api.deezer.com"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "music-library"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[assets]
+directory = "../frontend"
+binding = "ASSETS"

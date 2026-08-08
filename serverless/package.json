@@ -1,0 +1,12 @@
+{
+  "name": "personal-music-serverless",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute music-library --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute music-library --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.30.0"
+  }
+}

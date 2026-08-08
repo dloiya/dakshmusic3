@@ -1,0 +1,71 @@
+name: Acquire Audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      source_url:
+        required: true
+        type: string
+      title:
+        required: true
+        type: string
+      artist:
+        required: true
+        type: string
+      album:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl python3 python3-pip deno
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user -r providers/requirements.txt
+
+      - name: Acquire audio
+        id: acquire
+        env:
+          AUDIO_SOURCE_URL: ${{ inputs.source_url }}
+          AUDIO_TITLE: ${{ inputs.title }}
+          AUDIO_ARTIST: ${{ inputs.artist }}
+          AUDIO_ALBUM: ${{ inputs.album }}
+          AUDIO_OUTPUT: /tmp/output.flac
+        run: |
+          set -euo pipefail
+          chmod +x providers/primary.sh providers/fallback.sh
+          if providers/primary.sh; then
+            echo "provider=primary" >> "$GITHUB_OUTPUT"
+          else
+            rm -f /tmp/output.flac
+            providers/fallback.sh
+            echo "provider=fallback" >> "$GITHUB_OUTPUT"
+          fi
+          test -s /tmp/output.flac
+          file /tmp/output.flac
+
+      - name: Upload to Google Drive and callback
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          PROVIDER: ${{ steps.acquire.outputs.provider }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GOOGLE_DRIVE_ROOT_FOLDER: ${{ secrets.GOOGLE_DRIVE_ROOT_FOLDER }}
+          CALLBACK_URL: ${{ secrets.CALLBACK_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+        run: |
+          python3 .github/scripts/upload_drive.py /tmp/output.flac
