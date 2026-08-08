@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Personal Music Server</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: #0b0d10; color: #f4f6f8;
+    }
+    .wrap { max-width: 1000px; margin: auto; padding: 28px 18px 100px; }
+    h1 { margin: 0 0 6px; font-size: 30px; }
+    .muted { color: #8f98a3; }
+    .card {
+      background: #14181d; border: 1px solid #252b32; border-radius: 14px;
+      padding: 18px; margin-top: 18px;
+    }
+    input, button {
+      border: 1px solid #303740; border-radius: 9px; padding: 11px 13px;
+      background: #0f1216; color: inherit; font: inherit;
+    }
+    input { width: 100%; }
+    button { cursor: pointer; background: #1d252e; }
+    button:hover { background: #27313b; }
+    .row { display: flex; gap: 10px; }
+    .row input { flex: 1; }
+    .result, .track {
+      display: flex; align-items: center; gap: 12px; padding: 12px 0;
+      border-bottom: 1px solid #252b32;
+    }
+    .result:last-child, .track:last-child { border-bottom: 0; }
+    img.art { width: 52px; height: 52px; object-fit: cover; border-radius: 7px; background: #222; }
+    .info { flex: 1; min-width: 0; }
+    .title { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meta { color: #8f98a3; font-size: 13px; margin-top: 3px; }
+    .status { margin-top: 10px; color: #9aa5b1; min-height: 20px; }
+    .hidden { display: none; }
+    .pill { font-size: 12px; color: #9aa5b1; }
+    audio { width: 100%; margin-top: 16px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Personal Music Server</h1>
+  <div class="muted">Sample frontend for the Cloudflare Worker backend</div>
+
+  <section id="loginCard" class="card">
+    <h2>Login</h2>
+    <div class="row">
+      <input id="password" type="password" placeholder="Server password">
+      <button onclick="login()">Login</button>
+    </div>
+    <div id="loginStatus" class="status"></div>
+  </section>
+
+  <main id="app" class="hidden">
+    <section class="card">
+      <h2>Search</h2>
+      <div class="row">
+        <input id="query" placeholder="Song, artist or album" onkeydown="if(event.key==='Enter') search()">
+        <button onclick="search()">Search</button>
+      </div>
+      <div id="searchStatus" class="status"></div>
+      <div id="results"></div>
+    </section>
+
+    <section class="card">
+      <h2>Playlist</h2>
+      <button onclick="loadPlaylist()">Refresh</button>
+      <div id="playlistStatus" class="status"></div>
+      <div id="playlist"></div>
+      <audio id="player" controls></audio>
+    </section>
+  </main>
+</div>
+
+<script>
+const api = "/api/v1";
+
+async function request(path, options = {}) {
+  const res = await fetch(api + path, {
+    credentials: "include",
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+  });
+  const text = await res.text();
+  let data = {};
+  try { data = JSON.parse(text); } catch {}
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function login() {
+  const status = document.getElementById("loginStatus");
+  status.textContent = "Logging in...";
+  try {
+    await request("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ password: document.getElementById("password").value })
+    });
+    document.getElementById("loginCard").classList.add("hidden");
+    document.getElementById("app").classList.remove("hidden");
+    status.textContent = "";
+    loadPlaylist();
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+
+async function search() {
+  const q = document.getElementById("query").value.trim();
+  if (!q) return;
+  const results = document.getElementById("results");
+  const status = document.getElementById("searchStatus");
+  status.textContent = "Searching...";
+  results.innerHTML = "";
+
+  try {
+    const data = await request("/search?q=" + encodeURIComponent(q));
+    status.textContent = `${data.items.length} result(s)`;
+    for (const item of data.items) {
+      const row = document.createElement("div");
+      row.className = "result";
+      row.innerHTML = `
+        <img class="art" src="${item.artwork_url || ""}" onerror="this.style.visibility='hidden'">
+        <div class="info">
+          <div class="title">${escapeHtml(item.title || "")}</div>
+          <div class="meta">${escapeHtml(item.artist || "")} · ${escapeHtml(item.album || "")}</div>
+        </div>
+        <button>Add</button>`;
+      row.querySelector("button").onclick = () => addTrack(item);
+      results.appendChild(row);
+    }
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+
+async function addTrack(item) {
+  try {
+    await request("/playlist", {
+      method: "POST",
+      body: JSON.stringify(item)
+    });
+    loadPlaylist();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function loadPlaylist() {
+  const box = document.getElementById("playlist");
+  const status = document.getElementById("playlistStatus");
+  status.textContent = "Loading...";
+  box.innerHTML = "";
+  try {
+    const tracks = await request("/playlist");
+    status.textContent = `${tracks.length} track(s)`;
+    for (const track of tracks) {
+      const row = document.createElement("div");
+      row.className = "track";
+      row.innerHTML = `
+        <div class="pill">${track.position}</div>
+        <div class="info">
+          <div class="title">${escapeHtml(track.title || "")}</div>
+          <div class="meta">${escapeHtml(track.artist || "")} · ${escapeHtml(track.album || "")}</div>
+        </div>
+        <button>Play</button>`;
+      row.querySelector("button").onclick = () => playTrack(track.id);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+
+function playTrack(id) {
+  const player = document.getElementById("player");
+  player.src = api + "/playback/" + encodeURIComponent(id);
+  player.play().catch(() => {});
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
+  }[c]));
+}
+</script>
+</body>
+</html>
