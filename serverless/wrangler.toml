@@ -1,4 +1,4 @@
-name = "personal-music-server"
+name = "dakshmusic3"
 main = "worker.js"
 compatibility_date = "2026-07-01"
 
