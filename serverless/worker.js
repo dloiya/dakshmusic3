@@ -1150,4 +1150,86 @@ export default {
           200,
           {
             "Set-Cookie":
-  
+              "music_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
+          }
+        );
+      }
+
+      /* =====================================================
+         SEARCH / PLAYLIST
+         ===================================================== */
+
+      if (
+        path === "/api/v1/search" &&
+        req.method === "GET"
+      ) {
+        return search(env, req);
+      }
+
+      if (
+        path === "/api/v1/playlist"
+      ) {
+        return playlist(
+          env,
+          req.method,
+          req
+        );
+      }
+
+      /* =====================================================
+         JOBS
+         ===================================================== */
+
+      const jobMatch = path.match(
+        /^\/api\/v1\/jobs\/([^/]+)$/
+      );
+
+      if (
+        jobMatch &&
+        req.method === "GET"
+      ) {
+        return jobStatus(
+          env,
+          jobMatch[1]
+        );
+      }
+
+      /* =====================================================
+         PLAYBACK
+         ===================================================== */
+
+      const playMatch = path.match(
+        /^\/api\/v1\/playback\/(\d+)$/
+      );
+
+      if (
+        playMatch &&
+        req.method === "GET"
+      ) {
+        return playback(
+          env,
+          Number(playMatch[1])
+        );
+      }
+
+      return json(
+        {
+          error: "Not found",
+        },
+        404
+      );
+    } catch (e) {
+      console.error(e);
+
+      return json(
+        {
+          error: String(
+            e?.message || e
+          ),
+        },
+        500
+      );
+    }
+  },
+};
+
