@@ -49,6 +49,8 @@ jobs:
           AUDIO_ALBUM: ${{ inputs.album }}
           AUDIO_OUTPUT: /tmp/output.flac
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           set -euo pipefail
           chmod +x providers/primary.sh providers/fallback.sh
