@@ -1,75 +1,84 @@
-import os, sys, time, requests
+import sys, time, requests
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/149 Safari/537.36"
 
 _token_cache = {"value": None, "expires_at": 0}
 
 
-def _get_access_token():
+def _get_anonymous_token(session):
     """
-    Client-credentials flow against Spotify's Web API.
+    Fetches a short-lived anonymous access token the same way
+    open.spotify.com's own web player does for logged-out visitors.
 
-    Requires SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET in the environment.
-    These come from a free Spotify Developer app:
-    https://developer.spotify.com/dashboard
+    This does NOT require a Spotify account, Premium, or a registered
+    developer app -- it's the same mechanism the search page itself uses
+    to let anyone browse/search without signing in. (Spotify's official
+    Web API now requires a Premium account to even register an app, which
+    is why we don't use that path here.)
     """
     now = time.time()
     if _token_cache["value"] and _token_cache["expires_at"] > now + 10:
         return _token_cache["value"]
 
-    client_id = os.environ.get("SPOTIFY_CLIENT_ID")
-    client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        raise RuntimeError(
-            "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET are not configured "
-            "(required for Spotify Web API search)"
-        )
+    # Visiting the homepage first establishes the cookies the token
+    # endpoint expects.
+    session.get(
+        "https://open.spotify.com/",
+        headers={"User-Agent": UA},
+        timeout=20,
+    )
 
-    r = requests.post(
-        "https://accounts.spotify.com/api/token",
-        data={"grant_type": "client_credentials"},
-        auth=(client_id, client_secret),
+    r = session.get(
+        "https://open.spotify.com/get_access_token",
+        params={"reason": "transport", "productType": "web_player"},
+        headers={"User-Agent": UA, "Accept": "application/json"},
         timeout=20,
     )
     r.raise_for_status()
     data = r.json()
 
-    _token_cache["value"] = data["access_token"]
-    _token_cache["expires_at"] = now + data.get("expires_in", 3600)
-    return _token_cache["value"]
+    token = data.get("accessToken")
+    if not token:
+        raise RuntimeError("Could not obtain an anonymous Spotify access token")
+
+    _token_cache["value"] = token
+    _token_cache["expires_at"] = data.get("accessTokenExpirationTimestampMs", (now + 3000) * 1000) / 1000
+    return token
 
 
 def spotify_url_from_search(title, artist, kind="track"):
     """
-    Search the official Spotify Web API and return the first matching
-    track/album URL. Replaces the old approach of scraping
-    open.spotify.com/search, which doesn't work because that page is a
-    JS-rendered SPA and returns no track links in the raw HTML.
+    Resolve a track/album to its Spotify URL using the same anonymous
+    web-player search endpoint the public search page uses when logged
+    out. Replaces the old approach of regex-scraping
+    open.spotify.com/search's raw HTML, which doesn't work because that
+    page is a JS-rendered SPA and returns no track links without
+    executing JavaScript.
     """
-    token = _get_access_token()
+    session = requests.Session()
+    token = _get_anonymous_token(session)
 
-    q = f"track:{title} artist:{artist}" if kind == "track" else f"album:{title} artist:{artist}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": UA,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
-    r = requests.get(
-        "https://api.spotify.com/v1/search",
-        params={"q": q, "type": kind, "limit": 5},
-        headers={"Authorization": f"Bearer {token}", "User-Agent": UA},
-        timeout=20,
-    )
-    r.raise_for_status()
-    data = r.json()
-
-    items = data.get(f"{kind}s", {}).get("items", [])
-    if not items:
-        # Fall back to a looser, unstructured query before giving up.
-        r = requests.get(
+    def _search(query):
+        r = session.get(
             "https://api.spotify.com/v1/search",
-            params={"q": f"{artist} {title}", "type": kind, "limit": 5},
-            headers={"Authorization": f"Bearer {token}", "User-Agent": UA},
+            params={"q": query, "type": kind, "limit": 5},
+            headers=headers,
             timeout=20,
         )
         r.raise_for_status()
-        items = r.json().get(f"{kind}s", {}).get("items", [])
+        return r.json().get(f"{kind}s", {}).get("items", [])
+
+    field = "track" if kind == "track" else "album"
+    items = _search(f"{field}:{title} artist:{artist}")
+    if not items:
+        items = _search(f"{artist} {title}")
 
     if not items:
         raise RuntimeError(f"No Spotify {kind} result found for {artist} - {title}")

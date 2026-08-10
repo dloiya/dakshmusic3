@@ -48,8 +48,6 @@ jobs:
           AUDIO_ARTIST: ${{ inputs.artist }}
           AUDIO_ALBUM: ${{ inputs.album }}
           AUDIO_OUTPUT: /tmp/output.flac
-          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
-          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
         run: |
           set -euo pipefail
