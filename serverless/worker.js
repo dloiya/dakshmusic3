@@ -45,7 +45,9 @@ async function sha256(text) {
  *
  * PBKDF2
  * SHA-256
- * 310000 iterations
+ * 100000 iterations
+ * (Cloudflare Workers' crypto.subtle caps PBKDF2 at 100000; it doesn't
+ *  support Node's higher iteration counts.)
  * 256-bit output
  */
 async function pbkdf2(password, saltB64) {
@@ -80,7 +82,7 @@ async function pbkdf2(password, saltB64) {
     {
       name: "PBKDF2",
       salt: raw,
-      iterations: 310000,
+      iterations: 100000,
       hash: "SHA-256",
     },
     key,
