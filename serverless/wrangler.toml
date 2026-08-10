@@ -10,6 +10,8 @@ GENERAL_CACHE_LIMIT = "25"
 MAX_ALBUM_SESSIONS = "5"
 DEVICE_CACHE_LIMIT = "10"
 DEEZER_API = "https://api.deezer.com"
+GITHUB_OWNER = "dloiya"
+GITHUB_REPO = "dakshmusic3"
 
 [[d1_databases]]
 binding = "DB"
