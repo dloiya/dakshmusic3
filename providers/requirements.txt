@@ -1,4 +1,5 @@
 SpotiFLAC==1.5.2
+nodriver
 yt-dlp
 mutagen
 requests
