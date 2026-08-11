@@ -291,6 +291,7 @@ def send_callback(uploaded):
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; DakshMusicServer/1.0; +https://github.com/dloiya/dakshmusic3)",
             "X-Callback-Secret": callback_secret,
         },
         method="POST",
