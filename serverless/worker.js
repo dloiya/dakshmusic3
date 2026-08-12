@@ -686,6 +686,51 @@ async function jobStatus(
    ACQUISITION CALLBACK
    ========================================================= */
 
+async function evictOldGeneralCache(
+  env,
+  keep = 25
+) {
+  const old =
+    await env.DB.prepare(
+      `
+      SELECT id, drive_file_id
+      FROM general_cache
+      ORDER BY last_accessed_at DESC
+      LIMIT -1 OFFSET ?
+      `
+    )
+      .bind(keep)
+      .all();
+
+  for (
+    const row of
+      old.results || []
+  ) {
+    await env.DB.prepare(
+      `
+      DELETE FROM general_cache
+      WHERE id = ?
+      `
+    )
+      .bind(row.id)
+      .run();
+
+    if (row.drive_file_id) {
+      try {
+        await env.AUDIO_BUCKET.delete(
+          row.drive_file_id
+        );
+      } catch (e) {
+        console.error(
+          "Failed to delete evicted R2 object:",
+          row.drive_file_id,
+          e
+        );
+      }
+    }
+  }
+}
+
 async function callback(
   env,
   req
@@ -797,29 +842,7 @@ async function callback(
       /*
        * Keep maximum 25 general-cache entries.
        */
-      const old =
-        await env.DB.prepare(
-          `
-          SELECT id, drive_file_id
-          FROM general_cache
-          ORDER BY last_accessed_at DESC
-          LIMIT -1 OFFSET 25
-          `
-        ).all();
-
-      for (
-        const row of
-          old.results || []
-      ) {
-        await env.DB.prepare(
-          `
-          DELETE FROM general_cache
-          WHERE id = ?
-          `
-        )
-          .bind(row.id)
-          .run();
-      }
+      await evictOldGeneralCache(env, 25);
     }
   }
 
@@ -829,113 +852,134 @@ async function callback(
 }
 
 /* =========================================================
-   GOOGLE DRIVE
+   AUDIO UPLOAD (from the GitHub Actions acquisition workflow)
    ========================================================= */
 
-async function driveToken(env) {
+async function uploadAudio(
+  env,
+  req,
+  jobId
+) {
+  const supplied =
+    req.headers.get(
+      "X-Callback-Secret"
+    );
+
   if (
-    !env.GOOGLE_CLIENT_ID ||
-    !env.GOOGLE_CLIENT_SECRET ||
-    !env.GOOGLE_REFRESH_TOKEN
+    !supplied ||
+    supplied !==
+      env.CALLBACK_SECRET
   ) {
-    throw new Error(
-      "Google Drive credentials are not configured"
-    );
-  }
-
-  const response =
-    await fetch(
-      "https://oauth2.googleapis.com/token",
+    return json(
       {
-        method: "POST",
-
-        headers: {
-          "content-type":
-            "application/x-www-form-urlencoded",
-
-          "accept":
-            "application/json",
-        },
-
-        body:
-          new URLSearchParams({
-            client_id:
-              env.GOOGLE_CLIENT_ID,
-
-            client_secret:
-              env.GOOGLE_CLIENT_SECRET,
-
-            refresh_token:
-              env.GOOGLE_REFRESH_TOKEN,
-
-            grant_type:
-              "refresh_token",
-          }),
-      }
+        error: "Unauthorized",
+      },
+      401
     );
+  }
 
-  if (!response.ok) {
-    const errorBody =
-      await response.text();
+  const job =
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM download_jobs
+      WHERE id = ?
+      `
+    )
+      .bind(jobId)
+      .first();
 
-    let errorDetails;
+  if (!job) {
+    return json(
+      {
+        error: "Job not found",
+      },
+      404
+    );
+  }
 
-    try {
-      errorDetails =
-        JSON.parse(errorBody);
-    } catch {
-      errorDetails = {
-        raw: errorBody,
-      };
+  const url = new URL(req.url);
+  const provider =
+    url.searchParams.get(
+      "provider"
+    ) || null;
+  const format =
+    url.searchParams.get(
+      "format"
+    ) || "flac";
+  const contentType =
+    req.headers.get(
+      "content-type"
+    ) ||
+    (format === "mp3"
+      ? "audio/mpeg"
+      : "audio/flac");
+
+  const storageKey = `tracks/${job.track_id}.${format}`;
+
+  await env.AUDIO_BUCKET.put(
+    storageKey,
+    req.body,
+    {
+      httpMetadata: {
+        contentType,
+      },
     }
+  );
 
-    /*
-     * Never log:
-     * - GOOGLE_CLIENT_SECRET
-     * - GOOGLE_REFRESH_TOKEN
-     *
-     * Only log Google's error classification.
-     */
-    console.error(
-      "Google token refresh failed:",
-      JSON.stringify({
-        status:
-          response.status,
+  await env.DB.prepare(
+    `
+    UPDATE download_jobs
+    SET
+      status = 'complete',
+      provider = ?,
+      drive_file_id = ?,
+      format = ?,
+      mime_type = ?,
+      error = NULL,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+    `
+  )
+    .bind(
+      provider,
+      storageKey,
+      format,
+      contentType,
+      jobId
+    )
+    .run();
 
-        error:
-          errorDetails?.error ||
-          null,
+  if (job.kind === "general") {
+    await env.DB.prepare(
+      `
+      INSERT OR REPLACE INTO general_cache
+        (
+          track_id,
+          drive_file_id,
+          last_accessed_at
+        )
+      VALUES
+        (?, ?, CURRENT_TIMESTAMP)
+      `
+    )
+      .bind(
+        job.track_id,
+        storageKey
+      )
+      .run();
 
-        error_description:
-          errorDetails?.error_description ||
-          null,
-      })
-    );
-
-    throw new Error(
-      `Google token refresh failed: ` +
-      `${response.status}`
-    );
+    await evictOldGeneralCache(env, 25);
   }
 
-  const data =
-    await response.json();
-
-  if (!data.access_token) {
-    console.error(
-      "Google OAuth response did not contain access_token"
-    );
-
-    throw new Error(
-      "Google did not return an access token"
-    );
-  }
-
-  return data.access_token;
+  return json({
+    ok: true,
+    storage_key: storageKey,
+  });
 }
 
 /* =========================================================
-   PLAYBACK
+   R2 STORAGE
    ========================================================= */
 
 async function playback(
@@ -947,7 +991,7 @@ async function playback(
       `
       SELECT
         t.*,
-        g.drive_file_id
+        g.drive_file_id AS storage_key
       FROM tracks t
       JOIN general_cache g
         ON g.track_id = t.id
@@ -967,32 +1011,21 @@ async function playback(
     );
   }
 
-  const token =
-    await driveToken(env);
-
-  const response =
-    await fetch(
-      `https://www.googleapis.com/drive/v3/files/` +
-      `${encodeURIComponent(row.drive_file_id)}` +
-      `?alt=media`,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-        },
-      }
+  const object =
+    await env.AUDIO_BUCKET.get(
+      row.storage_key
     );
 
-  if (!response.ok) {
+  if (!object) {
     console.error(
-      "Drive download failed:",
-      response.status
+      "R2 object not found:",
+      row.storage_key
     );
 
     return json(
       {
         error:
-          "Drive download failed",
+          "Storage object not found",
       },
       502
     );
@@ -1022,22 +1055,22 @@ async function playback(
     .run();
 
   return new Response(
-    response.body,
+    object.body,
     {
       status: 200,
-
       headers: {
         "content-type":
-          row.mime_type ||
+          object.httpMetadata
+            ?.contentType ||
           (
             row.format === "mp3"
               ? "audio/mpeg"
               : "audio/flac"
           ),
-
+        "content-length":
+          String(object.size),
         "cache-control":
           "private, max-age=60",
-
         "content-disposition":
           `inline; filename="${encodeURIComponent(
             row.title || "track"
@@ -1254,6 +1287,23 @@ export default {
         return jobStatus(
           env,
           jobMatch[1]
+        );
+      }
+
+      const audioUploadMatch =
+        path.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/audio$/
+        );
+
+      if (
+        audioUploadMatch &&
+        (req.method === "PUT" ||
+          req.method === "POST")
+      ) {
+        return uploadAudio(
+          env,
+          req,
+          audioUploadMatch[1]
         );
       }
 

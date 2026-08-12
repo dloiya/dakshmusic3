@@ -8,9 +8,9 @@ Cloudflare Worker and run on-demand audio acquisition.
 ## Required accounts
 
 - GitHub
-- Cloudflare
-- Google account/Drive
+- Cloudflare (with R2 enabled -- free tier is fine)
 - No VPS
+- No Google account needed
 
 ## 1. Put the project on GitHub
 
@@ -18,27 +18,32 @@ Create a repository and upload the project. A private repository is recommended.
 
 Never commit:
 - `.env`
-- Google refresh tokens
 - Cloudflare tokens
 - GitHub tokens
 - passwords
 
 ## 2. Cloudflare secrets
 
-Create a Cloudflare API token with the minimum Workers/D1 permissions required
-for this project. Add these GitHub repository secrets:
+Create a Cloudflare API token with the minimum Workers/D1/R2 permissions
+required for this project. Add these GitHub repository secrets:
 
     CLOUDFLARE_ACCOUNT_ID
     CLOUDFLARE_API_TOKEN
 
-## 3. Bootstrap D1
+## 3. Bootstrap D1 and R2
 
 Open:
 
     GitHub -> Actions -> Bootstrap Cloudflare -> Run workflow
 
-This creates `music-library`, configures `serverless/wrangler.toml`, and applies
-the database schema.
+This creates the D1 database, configures `serverless/wrangler.toml`, and
+applies the database schema.
+
+Separately, create the R2 bucket declared in `serverless/wrangler.toml`
+(`dakshmusic3-audio` by default) either via the Cloudflare dashboard
+(Workers & Pages -> R2) or:
+
+    wrangler r2 bucket create dakshmusic3-audio
 
 If repository branch protection prevents the workflow from committing the D1 ID,
 copy the ID from the workflow log into `serverless/wrangler.toml` using GitHub's
@@ -63,13 +68,11 @@ In Cloudflare Worker settings, create:
     GITHUB_TOKEN
     GITHUB_OWNER
     GITHUB_REPO
-    GOOGLE_CLIENT_ID
-    GOOGLE_CLIENT_SECRET
-    GOOGLE_REFRESH_TOKEN
     CALLBACK_SECRET
 
-The `GITHUB_TOKEN` only needs enough permission to dispatch the acquisition
-workflow in this repository.
+The `GITHUB_TOKEN` needs Actions (read and write) and Contents (read) or
+Workflows (read and write) permission to dispatch the acquisition workflow
+in this repository.
 
 ## 6. GitHub Actions acquisition secrets
 
@@ -79,12 +82,16 @@ In GitHub:
 
 Create:
 
-    GOOGLE_CLIENT_ID
-    GOOGLE_CLIENT_SECRET
-    GOOGLE_REFRESH_TOKEN
-    GOOGLE_DRIVE_ROOT_FOLDER
-    CALLBACK_URL
+    WORKER_BASE_URL
     CALLBACK_SECRET
+
+`WORKER_BASE_URL` is your Worker's URL, e.g.
+`https://dakshmusic3.<your-subdomain>.workers.dev` (no trailing slash).
+`CALLBACK_SECRET` must match the same value set as a Worker secret in step 5.
+
+Optionally, also set `YTDLP_COOKIES_B64` (base64-encoded `cookies.txt` from a
+logged-in browser session) to reduce YouTube fallback bot-check failures --
+see `providers/README.md`.
 
 ## 7. Domain
 
@@ -98,28 +105,21 @@ For example:
 
 Then the application is available from any device.
 
-## 8. Google OAuth
-
-Use:
-
-    https://music.example.com/api/v1/drive/oauth/callback
-
-as the production OAuth redirect URI.
-
-## 9. Audio flow
+## 8. Audio flow
 
     Device
       -> Cloudflare Worker
       -> D1
       -> GitHub workflow_dispatch
-      -> SpotiFLAC primary
+      -> SpotiFLAC primary (resolved via Apple Music search)
       -> YtFLAC fallback
-      -> Google Drive
-      -> callback
+      -> R2 (via an authenticated PUT to the Worker)
       -> D1
 
-The GitHub runner exists only while an acquisition job runs.
+The GitHub runner exists only while an acquisition job runs. Audio is
+streamed directly from R2 by the Worker on playback -- no OAuth token
+refresh involved, unlike the old Google Drive-based flow.
 
-## 10. Local requirements
+## 9. Local requirements
 
 None beyond a browser if you use GitHub's web UI. Git is optional.

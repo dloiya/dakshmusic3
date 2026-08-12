@@ -11,14 +11,15 @@ Production:
        |
        +--> GitHub Actions (on-demand acquisition)
                     |
-                    +--> SpotiFLAC
+                    +--> SpotiFLAC (resolved via Apple Music search)
                     +--> YtFLAC/yt-dlp fallback
-                    +--> Google Drive
+                    +--> R2 (via an authenticated PUT to the Worker)
        |
        v
     Device playback
 
-Permanent audio lives in Google Drive. No VPS, Docker, PostgreSQL or Redis is
+Permanent audio lives in Cloudflare R2, bound directly to the Worker (no OAuth
+token refresh needed for playback). No VPS, Docker, PostgreSQL or Redis is
 required for production.
 
 See `GITHUB_ONLY_SETUP.md`.

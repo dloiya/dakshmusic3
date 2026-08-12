@@ -64,15 +64,11 @@ jobs:
           test -s /tmp/output.flac
           file /tmp/output.flac
 
-      - name: Upload to Google Drive and callback
+      - name: Upload to R2 and complete job
         env:
           JOB_ID: ${{ inputs.job_id }}
           PROVIDER: ${{ steps.acquire.outputs.provider }}
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          GOOGLE_DRIVE_ROOT_FOLDER: ${{ secrets.GOOGLE_DRIVE_ROOT_FOLDER }}
-          CALLBACK_URL: ${{ secrets.CALLBACK_URL }}
+          WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
         run: |
-          python3 .github/scripts/upload_drive.py /tmp/output.flac
+          python3 .github/scripts/upload_r2.py /tmp/output.flac

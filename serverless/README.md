@@ -4,17 +4,19 @@ Production deployment uses:
 
 - Cloudflare Workers Free: public API + static frontend hosting
 - Cloudflare D1 Free: playlist/metadata/jobs database
+- Cloudflare R2 Free: permanent audio storage (bound directly to the Worker)
 - Cloudflare Queues is not required; GitHub Actions is used as the on-demand audio worker
-- Google Drive: permanent audio library
 - GitHub Actions: on-demand SpotiFLAC/YtFLAC acquisition
 
 Cloudflare's current Workers Free plan includes D1, and D1 Free currently allows
 up to 500 MB per database, 5 million row reads/day and 100,000 row writes/day.
-GitHub Actions standard hosted runners are free for public repositories.
+R2's free tier includes 10 GB of storage with no egress fees. GitHub Actions
+standard hosted runners are free for public repositories.
 
 The audio acquisition workflow is intentionally separate. The Worker only dispatches
-a job; the GitHub runner performs acquisition, uploads the result to Google Drive,
-and updates D1 through a protected callback.
+a job; the GitHub runner performs acquisition and PUTs the result directly to the
+Worker's authenticated upload endpoint, which streams it into R2 and updates D1
+in the same request.
 
 ## Flow
 
@@ -22,14 +24,14 @@ and updates D1 through a protected callback.
       -> Cloudflare Worker
       -> D1
       -> GitHub workflow_dispatch
-      -> SpotiFLAC
+      -> SpotiFLAC (resolved via Apple Music search)
       -> YtFLAC fallback
-      -> Google Drive
-      -> callback Worker
+      -> R2 (via an authenticated PUT to the Worker)
       -> D1
       -> device
 
-The worker never stores permanent audio locally.
+The worker streams audio directly from R2 on playback -- no OAuth token
+refresh, unlike the old Google Drive-based flow.
 
 ## Cloudflare setup
 
@@ -43,13 +45,17 @@ Authenticate:
 
 Create the D1 database:
 
-    npx wrangler d1 create music-library
+    npx wrangler d1 create dakshmusic3
 
 Copy the returned database_id into wrangler.toml.
 
+Create the R2 bucket:
+
+    npx wrangler r2 bucket create dakshmusic3-audio
+
 Apply schema:
 
-    npx wrangler d1 execute music-library --remote --file=./serverless/schema.sql
+    npx wrangler d1 execute dakshmusic3 --remote --file=./serverless/schema.sql
 
 Set secrets:
 
@@ -57,11 +63,11 @@ Set secrets:
     npx wrangler secret put PASSWORD_HASH
     npx wrangler secret put PASSWORD_SALT
     npx wrangler secret put GITHUB_TOKEN
-    npx wrangler secret put GITHUB_OWNER
-    npx wrangler secret put GITHUB_REPO
-    npx wrangler secret put GOOGLE_CLIENT_ID
-    npx wrangler secret put GOOGLE_CLIENT_SECRET
-    npx wrangler secret put GOOGLE_REFRESH_TOKEN
+    npx wrangler secret put CALLBACK_SECRET
+
+`GITHUB_OWNER`/`GITHUB_REPO` are declared in `wrangler.toml`'s `[vars]` block
+directly rather than as secrets, since they're not sensitive and this avoids
+them being wiped by plaintext-var overwrite on the next `wrangler deploy`.
 
 Deploy:
 
@@ -71,17 +77,13 @@ Deploy:
 
 The repository running the acquisition workflow needs:
 
-    DEEZER_USER_AGENT
-    GOOGLE_CLIENT_ID
-    GOOGLE_CLIENT_SECRET
-    GOOGLE_REFRESH_TOKEN
-    GOOGLE_DRIVE_ROOT_FOLDER
-    CALLBACK_URL
+    WORKER_BASE_URL
     CALLBACK_SECRET
+    YTDLP_COOKIES_B64   (optional, reduces YouTube fallback bot-check failures)
 
-The callback URL is the deployed Worker URL plus:
-
-    /api/v1/jobs/callback
+`WORKER_BASE_URL` is your deployed Worker's URL (no trailing slash), e.g.
+`https://dakshmusic3.<your-subdomain>.workers.dev`. `CALLBACK_SECRET` must
+match the same value set as a Worker secret above.
 
 ## Password
 
@@ -93,7 +95,7 @@ Set the resulting `PASSWORD_SALT` and `PASSWORD_HASH` as Worker secrets.
 
 ## Important
 
-Do not put GitHub tokens, Google refresh tokens, or passwords into the repository.
+Do not put GitHub tokens or passwords into the repository.
 Use Cloudflare Worker secrets and GitHub Actions secrets.
 
 This design is on-demand: the API remains available through Cloudflare, while the
