@@ -10,12 +10,10 @@ def main():
 
     cmd = [
         "yt-dlp", f"ytsearch1:{title} {artist}", "--no-playlist", "-x",
+        "-f", "bestaudio/best",
         "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata",
         "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno",
         "--remote-components", "ejs:github",
-        # Best-effort mitigation for YouTube's bot-check on datacenter IPs.
-        # Not guaranteed to work — YouTube changes this frequently.
-        "--extractor-args", "youtube:player_client=android,ios",
         "-o", str(output.with_suffix(".%(ext)s")),
         "--no-warnings", "--print", "after_move:filepath",
     ]
