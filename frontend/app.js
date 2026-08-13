@@ -511,19 +511,47 @@
     prefetchNext();
   }
 
-  function prefetchNext() {
+  function pollJobSilently(jobId, attempt = 0) {
+    return new Promise((resolve) => {
+      if (attempt > 90) { resolve(false); return; }
+      setTimeout(async () => {
+        try {
+          const job = await getJob(jobId);
+          if (job.status === "complete") resolve(true);
+          else if (job.status === "failed") resolve(false);
+          else resolve(await pollJobSilently(jobId, attempt + 1));
+        } catch { resolve(false); }
+      }, 4000);
+    });
+  }
+
+  async function warmOnDeviceCache(trackId) {
+    try {
+      await fetch(`${API}/playback/${encodeURIComponent(trackId)}`, {
+        credentials: "include",
+        headers: { Range: "bytes=0-0", "X-Cache-Warm": "1" },
+      });
+    } catch { /* best effort */ }
+  }
+
+  async function prefetchNext() {
     const n = neighborTrack(1);
     if (!n || n.id == null) return;
-    // Best-effort, fire-and-forget: kick off server-side acquisition if the
-    // next track isn't cached yet (no-op if it already is or is already in
-    // progress), and nudge the on-device cache to warm it too. Starting
-    // this as soon as the current track begins gives it the current
-    // track's whole runtime to finish before it's actually needed.
-    acquireTrack(n.id).catch(() => {});
-    fetch(`${API}/playback/${encodeURIComponent(n.id)}`, {
-      credentials: "include",
-      headers: { Range: "bytes=0-0", "X-Cache-Warm": "1" },
-    }).catch(() => {});
+    // Runs entirely in the background -- the caller doesn't await this, so
+    // it never blocks the track that's actually playing right now. Ensure
+    // acquisition has actually finished before pinging for cache warm;
+    // pinging immediately (in parallel with acquisition) would almost
+    // always hit a 409 before the download can finish minutes later, and
+    // nothing would ever retry it -- so the on-device cache never
+    // actually got warmed through this path.
+    try {
+      const res = await acquireTrack(n.id);
+      if (res.cached) { warmOnDeviceCache(n.id); return; }
+      if (res.job_id) {
+        const ok = await pollJobSilently(res.job_id);
+        if (ok) warmOnDeviceCache(n.id);
+      }
+    } catch { /* best effort */ }
   }
 
   audio.addEventListener("error", async () => {

@@ -122,7 +122,7 @@ async function dispatchWarm(env, trackId) {
   const track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(trackId).first();
   if (!track?.source_url) return null;
   if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
-  if (!track.duration_ms) throw new Error(`Track ${trackId} has no canonical duration_ms; refusing acquisition without identity data`);
+  if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);
   const id = crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,'general','queued')`).bind(id, trackId).run();
   const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/acquire-audio.yml/dispatches`, {
@@ -162,7 +162,10 @@ async function warmWorkingCache(env, ctx) {
         return;
       }
     }
-    try { await dispatchWarm(env, id); } catch (e) { console.error("Working-cache warm failed", id, e); }
+    try { await dispatchWarm(env, id); } catch (e) {
+      const t = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(id).first();
+      console.error("Working-cache warm failed", t?.natural_key || id, e);
+    }
   };
   for (const id of immediate) await warmOne(id);
   if (backload.length) ctx.waitUntil((async () => { for (const id of backload) await warmOne(id); })());
@@ -257,7 +260,7 @@ async function appleImport(env, req, ctx) {
   await refreshTopPlayed(env);
   const top = await env.DB.prepare(`SELECT track_id,storage_key FROM top_played_cache ORDER BY rank LIMIT 100`).all();
   const missing = (top.results || []).filter(r => !r.storage_key).map(r => Number(r.track_id));
-  ctx.waitUntil((async () => { for (const id of missing) { try { await dispatchWarm(env, id); } catch (e) { console.error("Top-100 acquisition dispatch failed", id, e); } } })());
+  ctx.waitUntil((async () => { for (const id of missing) { try { await dispatchWarm(env, id); } catch (e) { const t = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(id).first(); console.error("Top-100 acquisition dispatch failed", t?.natural_key || id, e); } } })());
   let warm = { top100: 0, immediate: 0, backload: 0 };
   try { warm = await warmWorkingCache(env, ctx); } catch (e) { console.error("Post-import warm failed", e); }
   return json({ imported: matched.length, matched: matched.length, unmatched, top100: matched.slice(0, 100), queued: missing.length, warm });
@@ -289,7 +292,7 @@ async function addPlaylistEntry(env, body) {
   `).bind(track.id, pos?.p || 1, track.title, track.artist, track.album, track.artwork_url, track.duration_ms).run();
 
   let jobId = null;
-  try { jobId = await dispatchWarm(env, track.id); } catch (e) { console.error("Playlist-add acquisition dispatch failed", track.id, e); }
+  try { jobId = await dispatchWarm(env, track.id); } catch (e) { console.error("Playlist-add acquisition dispatch failed", track.natural_key || track.id, e); }
 
   return json({ track_id: track.id, position: pos?.p || 1, entry_id: inserted.meta.last_row_id, already_present: false, job_id: jobId }, 201);
 }
