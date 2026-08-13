@@ -57,9 +57,18 @@ async function evictOverLimit(cache, meta) {
   await setMeta(cache, meta);
 }
 
-async function cacheFullTrackInBackground(cache, fullReq, trackId) {
+async function cacheFullTrackInBackground(cache, fullReq, trackId, url) {
   try {
-    const resp = await fetch(fullReq.clone());
+    // A separate request object carrying a marker header, so the server
+    // can tell this background copy-for-caching fetch apart from the
+    // real playback request and skip incrementing play_count / LRU
+    // last_accessed_at for it -- otherwise every newly-cached track would
+    // silently count as two plays instead of one.
+    const warmReq = new Request(url.origin + url.pathname, {
+      credentials: "include",
+      headers: { "X-Cache-Warm": "1" },
+    });
+    const resp = await fetch(warmReq);
     if (!resp.ok) return;
     await cache.put(fullReq, resp.clone());
     const meta = await touchLRU(cache, trackId);
@@ -105,7 +114,7 @@ async function handlePlayback(event, request, trackId, url) {
     return sliceForRange(cachedFull, request.headers.get("Range"));
   }
 
-  event.waitUntil(cacheFullTrackInBackground(cache, fullReq, trackId));
+  event.waitUntil(cacheFullTrackInBackground(cache, fullReq, trackId, url));
   return fetch(request);
 }
 

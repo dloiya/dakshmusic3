@@ -1087,9 +1087,11 @@ async function uploadAudio(
 
 async function playback(
   env,
-  trackId
+  trackId,
+  req
 ) {
   const row =
+
     await env.DB.prepare(
       `
       SELECT
@@ -1134,28 +1136,35 @@ async function playback(
     );
   }
 
-  await env.DB.prepare(
-    `
-    UPDATE tracks
-    SET
-      play_count = play_count + 1,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-    `
-  )
-    .bind(trackId)
-    .run();
+  const isCacheWarm =
+    req?.headers?.get(
+      "X-Cache-Warm"
+    ) === "1";
 
-  await env.DB.prepare(
-    `
-    UPDATE general_cache
-    SET last_accessed_at =
-      CURRENT_TIMESTAMP
-    WHERE track_id = ?
-    `
-  )
-    .bind(trackId)
-    .run();
+  if (!isCacheWarm) {
+    await env.DB.prepare(
+      `
+      UPDATE tracks
+      SET
+        play_count = play_count + 1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `
+    )
+      .bind(trackId)
+      .run();
+
+    await env.DB.prepare(
+      `
+      UPDATE general_cache
+      SET last_accessed_at =
+        CURRENT_TIMESTAMP
+      WHERE track_id = ?
+      `
+    )
+      .bind(trackId)
+      .run();
+  }
 
   return new Response(
     object.body,
@@ -1425,7 +1434,8 @@ export default {
       ) {
         return playback(
           env,
-          Number(playMatch[1])
+          Number(playMatch[1]),
+          req
         );
       }
 
