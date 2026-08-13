@@ -28,6 +28,26 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|/|&|;|\bfeat\.?\b|\bft\.?\b|\band\b)\s*", re.IGNORECASE)
+
+
+def artist_similarity(expected: str, actual: str) -> float:
+    """
+    Some sources (notably YouTube-derived metadata) tag the artist field
+    with every credited songwriter/performer, comma-separated, rather than
+    just the primary artist -- e.g. "Ninajirachi, Nina Wilson, Benjamin
+    Michael Lee, ...". Comparing that whole blob against a single artist
+    name with SequenceMatcher scores it low purely because of the length
+    mismatch, even when the correct artist is right there as one of the
+    names. Also check each individually-split name; the correct match
+    only needs to be a strong match against one of them.
+    """
+    whole = similarity(expected, actual)
+    candidates = [c for c in ARTIST_SPLIT_RE.split(actual or "") if c.strip()]
+    best_candidate = max((similarity(expected, c) for c in candidates), default=0.0)
+    return max(whole, best_candidate)
+
+
 def read_metadata(path: Path) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
@@ -120,7 +140,7 @@ def main(path_text: str) -> None:
     actual_isrc = normalize_isrc(actual.get("isrc", ""))
 
     title_score = similarity(expected_title, actual_title)
-    artist_score = similarity(expected_artist, actual_artist)
+    artist_score = artist_similarity(expected_artist, actual_artist)
 
     duration_delta_s = (
         abs(actual_duration_s - expected_duration_s)
