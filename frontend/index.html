@@ -32,7 +32,6 @@
     .track-actions { display: flex; gap: 5px; }
     .track-actions button { padding: 7px 9px; }
     audio { width: 100%; margin-top: 16px; }
-    .file-input { max-width: 100%; }
   </style>
 </head>
 <body>
@@ -66,9 +65,9 @@
         <button onclick="loadPlaylist()">Refresh</button>
         <button onclick="document.getElementById('playlistFile').click()">Import Apple Music CSV</button>
         <button class="danger" onclick="clearPlaylist()">Clear Playlist</button>
-        <input id="playlistFile" class="hidden file-input" type="file" accept=".csv,text/csv" onchange="importAppleMusicCSV(event)">
+        <input id="playlistFile" class="hidden" type="file" accept=".csv,text/csv" onchange="importAppleMusicCSV(event)">
       </div>
-      <div class="muted">Export your Apple Music playlist as CSV, then import that file here.</div>
+      <div class="muted">Export your Apple Music playlist to CSV, then import the file here. Tracks are matched against Deezer before being queued for acquisition.</div>
       <div id="playlistStatus" class="status"></div>
       <div id="playlist"></div>
       <audio id="player" controls></audio>
@@ -96,17 +95,12 @@ async function login() {
   const status = document.getElementById("loginStatus");
   status.textContent = "Logging in...";
   try {
-    await request("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ password: document.getElementById("password").value })
-    });
+    await request("/auth/login", { method: "POST", body: JSON.stringify({ password: document.getElementById("password").value }) });
     document.getElementById("loginCard").classList.add("hidden");
     document.getElementById("app").classList.remove("hidden");
     status.textContent = "";
     loadPlaylist();
-  } catch (e) {
-    status.textContent = e.message;
-  }
+  } catch (e) { status.textContent = e.message; }
 }
 
 async function search() {
@@ -125,26 +119,19 @@ async function search() {
       row.className = "result";
       row.innerHTML = `
         <img class="art" src="${item.artwork_url || ""}" onerror="this.style.visibility='hidden'">
-        <div class="info">
-          <div class="title">${escapeHtml(item.title || "")}</div>
-          <div class="meta">${escapeHtml(item.artist || "")} · ${escapeHtml(item.album || "")}</div>
-        </div>
+        <div class="info"><div class="title">${escapeHtml(item.title || "")}</div><div class="meta">${escapeHtml(item.artist || "")} · ${escapeHtml(item.album || "")}</div></div>
         <button>Add</button>`;
       row.querySelector("button").onclick = () => addTrack(item);
       results.appendChild(row);
     }
-  } catch (e) {
-    status.textContent = e.message;
-  }
+  } catch (e) { status.textContent = e.message; }
 }
 
 async function addTrack(item) {
   try {
     await request("/playlist", { method: "POST", body: JSON.stringify(item) });
     loadPlaylist();
-  } catch (e) {
-    alert(e.message);
-  }
+  } catch (e) { alert(e.message); }
 }
 
 async function loadPlaylist() {
@@ -160,17 +147,10 @@ async function loadPlaylist() {
       row.className = "track";
       row.innerHTML = `
         <div class="pill">${track.position}</div>
-        <div class="info">
-          <div class="title">${escapeHtml(track.title || "")}</div>
-          <div class="meta">${escapeHtml(track.artist || "")} · ${escapeHtml(track.album || "")}</div>
-        </div>
+        <div class="info"><div class="title">${escapeHtml(track.title || "")}</div><div class="meta">${escapeHtml(track.artist || "")} · ${escapeHtml(track.album || "")}</div></div>
         <div class="track-actions">
-          <button title="Move up">↑</button>
-          <button title="Move down">↓</button>
-          <button title="Play">▶</button>
-          <button class="danger" title="Remove">×</button>
+          <button title="Move up">↑</button><button title="Move down">↓</button><button title="Play">▶</button><button class="danger" title="Remove">×</button>
         </div>`;
-
       const buttons = row.querySelectorAll("button");
       buttons[0].onclick = () => moveTrack(track.entry_id, track.position - 1);
       buttons[1].onclick = () => moveTrack(track.entry_id, track.position + 1);
@@ -178,21 +158,14 @@ async function loadPlaylist() {
       buttons[3].onclick = () => removeTrack(track.entry_id);
       box.appendChild(row);
     }
-  } catch (e) {
-    status.textContent = e.message;
-  }
+  } catch (e) { status.textContent = e.message; }
 }
 
 async function moveTrack(entryId, position) {
   try {
-    await request("/playlist/" + encodeURIComponent(entryId), {
-      method: "PATCH",
-      body: JSON.stringify({ position })
-    });
+    await request("/playlist/" + encodeURIComponent(entryId), { method: "PATCH", body: JSON.stringify({ position }) });
     await loadPlaylist();
-  } catch (e) {
-    alert(e.message);
-  }
+  } catch (e) { alert(e.message); }
 }
 
 async function removeTrack(entryId) {
@@ -200,9 +173,7 @@ async function removeTrack(entryId) {
   try {
     await request("/playlist/" + encodeURIComponent(entryId), { method: "DELETE" });
     await loadPlaylist();
-  } catch (e) {
-    alert(e.message);
-  }
+  } catch (e) { alert(e.message); }
 }
 
 async function clearPlaylist() {
@@ -210,9 +181,7 @@ async function clearPlaylist() {
   try {
     await request("/playlist", { method: "DELETE" });
     await loadPlaylist();
-  } catch (e) {
-    alert(e.message);
-  }
+  } catch (e) { alert(e.message); }
 }
 
 function playTrack(id) {
@@ -250,6 +219,25 @@ function findColumn(headers, names) {
   return -1;
 }
 
+function normalize(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function chooseDeezerMatch(items, title, artist) {
+  const t = normalize(title), a = normalize(artist);
+  let best = null, bestScore = -1;
+  for (const item of items || []) {
+    const it = normalize(item.title), ia = normalize(item.artist);
+    let score = 0;
+    if (it === t) score += 5;
+    else if (it.includes(t) || t.includes(it)) score += 2;
+    if (ia === a) score += 5;
+    else if (ia.includes(a) || a.includes(ia)) score += 2;
+    if (score > bestScore) { bestScore = score; best = item; }
+  }
+  return bestScore >= 4 ? best : null;
+}
+
 async function importAppleMusicCSV(event) {
   const file = event.target.files?.[0];
   event.target.value = "";
@@ -257,58 +245,45 @@ async function importAppleMusicCSV(event) {
 
   const status = document.getElementById("playlistStatus");
   try {
-    const text = await file.text();
-    const rows = parseCSV(text);
+    const rows = parseCSV(await file.text());
     if (rows.length < 2) throw new Error("CSV is empty or has no data rows");
 
     const headers = rows[0];
     const titleIdx = findColumn(headers, ["songname", "song", "trackname", "track", "name", "title"]);
-    const artistIdx = findColumn(headers, ["artistname", "artist", "artistname"]);
+    const artistIdx = findColumn(headers, ["artistname", "artist"]);
     const albumIdx = findColumn(headers, ["albumname", "album"]);
-    const urlIdx = findColumn(headers, ["songurl", "trackurl", "url", "applemusicurl"]);
+    if (titleIdx < 0 || artistIdx < 0) throw new Error("Could not find song/title and artist columns in the CSV");
 
-    if (titleIdx < 0 || artistIdx < 0) {
-      throw new Error("Could not find song/title and artist columns in the CSV");
-    }
-
-    const items = rows.slice(1)
-      .map(r => ({
-        title: (r[titleIdx] || "").trim(),
-        artist: (r[artistIdx] || "").trim(),
-        album: albumIdx >= 0 ? (r[albumIdx] || "").trim() : null,
-        source_url: urlIdx >= 0 ? (r[urlIdx] || "").trim() : null,
-        source: "apple_music",
-        source_id: urlIdx >= 0 ? (r[urlIdx] || "").trim() : null
-      }))
-      .filter(x => x.title && x.artist);
+    const items = rows.slice(1).map(r => ({
+      title: (r[titleIdx] || "").trim(),
+      artist: (r[artistIdx] || "").trim(),
+      album: albumIdx >= 0 ? (r[albumIdx] || "").trim() : null
+    })).filter(x => x.title && x.artist);
 
     if (!items.length) throw new Error("No usable tracks found in the CSV");
 
-    let imported = 0;
-    for (const item of items) {
-      status.textContent = `Importing ${imported + 1}/${items.length}: ${item.title}`;
+    let imported = 0, unmatched = 0;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      status.textContent = `Matching ${i + 1}/${items.length}: ${item.title} — ${item.artist}`;
       try {
-        await request("/playlist", {
-          method: "POST",
-          body: JSON.stringify(item)
-        });
+        const searchData = await request("/search?q=" + encodeURIComponent(`${item.title} ${item.artist}`));
+        const match = chooseDeezerMatch(searchData.items, item.title, item.artist);
+        if (!match) { unmatched++; continue; }
+        await request("/playlist", { method: "POST", body: JSON.stringify(match) });
         imported++;
       } catch (e) {
         console.warn("Failed to import", item, e);
       }
     }
 
-    status.textContent = `Imported ${imported}/${items.length} track(s)`;
+    status.textContent = `Imported ${imported}/${items.length} track(s); ${unmatched} unmatched.`;
     await loadPlaylist();
-  } catch (e) {
-    status.textContent = e.message;
-  }
+  } catch (e) { status.textContent = e.message; }
 }
 
 function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, c => ({
-    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-  }[c]));
+  return String(value).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[c]));
 }
 </script>
 </body>
