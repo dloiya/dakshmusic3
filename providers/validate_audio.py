@@ -15,6 +15,7 @@ def normalize(value: str) -> str:
     value = value.encode("ascii", "ignore").decode("ascii")
     value = value.lower()
     value = re.sub(r"\b(feat\.?|ft\.?)\b.*$", "", value)
+    value = re.sub(r"\b(official\s+(audio|video)|music\s+video|lyrics?|visualizer|remastered|audio|video)\b.*$", "", value)
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
