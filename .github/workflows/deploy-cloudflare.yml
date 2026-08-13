@@ -22,11 +22,15 @@ jobs:
         with:
           node-version: 22
 
+      - name: Patch acquisition identity resolver
+        run: python3 .github/scripts/patch_acquisition_identity.py
+
       - name: Verify Apple duration resolution is present
         run: |
           grep -q "resolveAppleDuration" serverless/entry.js
+          grep -q "Deezer duration lookup failed" serverless/entry.js
           grep -q "has no canonical duration_ms; refusing acquisition without identity data" serverless/entry.js
-          echo "Apple duration guard is present"
+          echo "Apple/Deezer duration resolver and strict identity guard are present"
 
       - name: Install Wrangler
         working-directory: serverless
