@@ -26,38 +26,47 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
           p = Path('serverless/entry.js')
           s = p.read_text()
-          old = '''  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
-          if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);'''
-          new = '''  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
 
-          // Apple imports may lack duration_ms. Resolve the canonical catalog
-          // duration before dispatch so strict identity validation remains intact.
-          if (!track.duration_ms && String(track.source || '').toLowerCase() === 'apple' && track.source_id) {
-            try {
-              const lookup = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(track.source_id)}&entity=song`);
-              if (lookup.ok) {
-                const data = await lookup.json();
-                const song = (data.results || []).find(x => x.wrapperType === 'track' && x.trackTimeMillis);
-                if (song?.trackTimeMillis) {
-                  track.duration_ms = Number(song.trackTimeMillis);
-                  await env.DB.prepare(`UPDATE tracks SET duration_ms=? WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`).bind(track.duration_ms, trackId).run();
-                }
-              }
-            } catch (e) {
-              console.warn('Apple duration lookup failed', track.source_id, e);
-            }
-          }
+          # Match the current acquisition guard by behavior rather than exact
+          # whitespace, so this patch remains stable when entry.js is formatted.
+          pattern = re.compile(
+              r'''(?m)^(?P<indent>\s*)if \(!env\.GITHUB_TOKEN \|\| !env\.GITHUB_OWNER \|\| !env\.GITHUB_REPO\) throw new Error\("GitHub Actions dispatch is not configured"\);\n(?P=indent)if \(!track\.duration_ms\) throw new Error\(`Track \$\{track\.natural_key \|\| trackId\} has no canonical duration_ms; refusing acquisition without identity data`\);'''
+          )
 
-          if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);'''
-          if old in s:
-              p.write_text(s.replace(old, new, 1))
-              print('Applied Apple duration backfill patch')
-          elif 'Apple imports may lack duration_ms.' in s:
+          replacement = '''\\g<indent>if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
+
+\\g<indent>// Apple imports may lack duration_ms. Resolve the canonical catalog
+\\g<indent>// duration before dispatch so strict identity validation remains intact.
+\\g<indent>if (!track.duration_ms && String(track.source || '').toLowerCase() === 'apple' && track.source_id) {
+\\g<indent>  try {
+\\g<indent>    const lookup = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(track.source_id)}&entity=song`);
+\\g<indent>    if (lookup.ok) {
+\\g<indent>      const data = await lookup.json();
+\\g<indent>      const song = (data.results || []).find(x => x.wrapperType === 'track' && x.trackTimeMillis);
+\\g<indent>      if (song?.trackTimeMillis) {
+\\g<indent>        track.duration_ms = Number(song.trackTimeMillis);
+\\g<indent>        await env.DB.prepare(`UPDATE tracks SET duration_ms=? WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`).bind(track.duration_ms, trackId).run();
+\\g<indent>      }
+\\g<indent>    }
+\\g<indent>  } catch (e) {
+\\g<indent>    console.warn('Apple duration lookup failed', track.source_id, e);
+\\g<indent>  }
+\\g<indent>}
+
+\\g<indent>if (!track.duration_ms) throw new Error(`Track $\\{track.natural_key || trackId\\} has no canonical duration_ms; refusing acquisition without identity data`);'''
+
+          if 'Apple imports may lack duration_ms.' in s:
               print('Apple duration backfill already present')
           else:
-              raise SystemExit('Acquisition duration guard not found')
+              s2, count = pattern.subn(replacement, s, count=1)
+              if count != 1:
+                  raise SystemExit('Acquisition duration guard not found')
+              p.write_text(s2)
+              print('Applied Apple duration backfill patch')
           PY
 
       - name: Install Wrangler
