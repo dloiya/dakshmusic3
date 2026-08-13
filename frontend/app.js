@@ -630,19 +630,17 @@
   btnPlay.addEventListener("click", onPlayBtn);
   btnCenter.addEventListener("click", selectCurrent);
 
-  let dragging = false, lastAngle = 0, accum = 0, lastTickTime = 0;
-  const TICK_DEG = 15;
+  let dragging = false, lastY = 0, accumPx = 0, lastTickTime = 0;
+  const TICK_PX = 14;
 
-  function angleFromEvent(e) {
-    const r = wheel.getBoundingClientRect();
-    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  function yFromEvent(e) {
     const p = e.touches ? e.touches[0] : e;
-    return Math.atan2(p.clientY - cy, p.clientX - cx) * (180 / Math.PI);
+    return p.clientY;
   }
 
   // How many rows one tick should move, scaled by how fast the wheel is
-  // spinning -- mirrors a real click wheel's acceleration: slow spins move
-  // one row at a time, fast spins fly through many.
+  // being dragged -- mirrors a real click wheel's acceleration: slow
+  // drags move one row at a time, fast drags fly through many.
   function stepForSpeed(now) {
     const msSinceLastTick = now - lastTickTime;
     lastTickTime = now;
@@ -654,26 +652,26 @@
 
   function wheelStart(e) {
     if (e.target.closest(".zone") || e.target.closest(".center-btn")) return;
-    dragging = true; accum = 0; lastTickTime = 0;
-    lastAngle = angleFromEvent(e);
+    dragging = true; accumPx = 0; lastTickTime = 0;
+    lastY = yFromEvent(e);
   }
   function wheelMove(e) {
     if (!dragging) return;
-    const a = angleFromEvent(e);
-    let diff = a - lastAngle;
-    if (diff > 180) diff -= 360;
-    if (diff < -180) diff += 360;
-    lastAngle = a;
-    accum += diff;
+    const y = yFromEvent(e);
+    // Finger moving up (y decreasing) scrolls forward/down through the
+    // list, matching normal mobile swipe-to-scroll conventions.
+    const diff = lastY - y;
+    lastY = y;
+    accumPx += diff;
     const now = performance.now();
-    while (accum >= TICK_DEG) {
-      accum -= TICK_DEG;
+    while (accumPx >= TICK_PX) {
+      accumPx -= TICK_PX;
       const step = stepForSpeed(now);
       if (current()?.kind === "nowplaying") { audio.volume = Math.min(1, audio.volume + 0.05); showVolume(); }
       else moveSelection(step);
     }
-    while (accum <= -TICK_DEG) {
-      accum += TICK_DEG;
+    while (accumPx <= -TICK_PX) {
+      accumPx += TICK_PX;
       const step = stepForSpeed(now);
       if (current()?.kind === "nowplaying") { audio.volume = Math.max(0, audio.volume - 0.05); showVolume(); }
       else moveSelection(-step);
