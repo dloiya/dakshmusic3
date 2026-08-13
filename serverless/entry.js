@@ -354,9 +354,11 @@ async function cacheWholeAlbum(env, albumId, name, artist, trackIds) {
       .bind(sessionId, albumId, name || "Unknown Album", artist || null).run();
     session = { id: sessionId };
 
-    // FIFO: strictly oldest-inserted evicted first, regardless of how
-    // recently an album was re-opened (unlike general_cache's LRU).
-    const old = await env.DB.prepare(`SELECT id FROM album_sessions ORDER BY created_at ASC LIMIT -1 OFFSET ?`).bind(limit).all();
+    // LRU: evict the least-recently-accessed album first, matching
+    // general_cache's eviction policy. last_accessed_at is bumped
+    // whenever an already-cached album is reopened (see the else branch
+    // below), so re-opening a cached album protects it from eviction.
+    const old = await env.DB.prepare(`SELECT id FROM album_sessions ORDER BY last_accessed_at DESC LIMIT -1 OFFSET ?`).bind(limit).all();
     for (const row of old.results || []) {
       const tracks = await env.DB.prepare(`SELECT drive_file_id FROM album_cache WHERE session_id=?`).bind(row.id).all();
       for (const t of tracks.results || []) {

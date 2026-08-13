@@ -4,12 +4,10 @@
  * Transparently caches full track responses in the Cache Storage API so
  * recently played songs are available instantly (and offline) without
  * re-fetching from the Worker/R2 every time. Capped at DEVICE_LIMIT tracks,
- * evicted FIFO -- strictly the oldest-inserted track evicted first,
- * regardless of how recently it's been replayed since. This is the same
- * eviction policy the server-side album cache uses, and unlike that one,
- * this cache is shared across every playback context (playlist, queue,
- * album, anywhere else audio gets played from) rather than being scoped
- * per-context.
+ * evicted least-recently-used first -- a track re-accessed gets moved to
+ * the front and stays cached longer, matching the same LRU policy used by
+ * the server-side caches. Shared across every playback context (playlist,
+ * queue, album, anywhere else audio gets played from) as one single queue.
  */
 
 const CACHE_NAME = "device-audio-v1";
@@ -34,18 +32,17 @@ async function setMeta(cache, meta) {
   await cache.put(META_URL, new Response(JSON.stringify(meta), { headers: { "content-type": "application/json" } }));
 }
 
-async function recordInsertion(cache, trackId) {
+async function touchLRU(cache, trackId) {
   const meta = await getMeta(cache);
-  if (!meta.order.includes(trackId)) {
-    meta.order.push(trackId); // FIFO: newest goes to the back, oldest stays at the front
-  }
+  meta.order = meta.order.filter((id) => id !== trackId);
+  meta.order.unshift(trackId);
   await setMeta(cache, meta);
   return meta;
 }
 
 async function evictOverLimit(cache, meta) {
   while (meta.order.length > DEVICE_LIMIT) {
-    const evictedId = meta.order.shift(); // evict the oldest-inserted, not the least-recently-used
+    const evictedId = meta.order.pop();
     try {
       await cache.delete(canonicalRequest(new URL(`${self.location.origin}/api/v1/playback/${evictedId}`)));
     } catch { /* best effort */ }
@@ -57,9 +54,9 @@ async function cacheFullTrackInBackground(cache, fullReq, trackId, url) {
   try {
     // A separate request object carrying a marker header, so the server
     // can tell this background copy-for-caching fetch apart from the
-    // real playback request and skip incrementing play_count for it --
-    // otherwise every newly-cached track would silently count as two
-    // plays instead of one.
+    // real playback request and skip incrementing play_count / LRU
+    // last_accessed_at for it -- otherwise every newly-cached track would
+    // silently count as two plays instead of one.
     const warmReq = new Request(url.origin + url.pathname, {
       credentials: "include",
       headers: { "X-Cache-Warm": "1" },
@@ -67,7 +64,7 @@ async function cacheFullTrackInBackground(cache, fullReq, trackId, url) {
     const resp = await fetch(warmReq);
     if (!resp.ok) return;
     await cache.put(fullReq, resp.clone());
-    const meta = await recordInsertion(cache, trackId);
+    const meta = await touchLRU(cache, trackId);
     await evictOverLimit(cache, meta);
   } catch { /* best effort, offline or transient failure */ }
 }
@@ -106,6 +103,7 @@ async function handlePlayback(event, request, trackId, url) {
   const cachedFull = await cache.match(fullReq);
 
   if (cachedFull) {
+    event.waitUntil(touchLRU(cache, trackId));
     return sliceForRange(cachedFull, request.headers.get("Range"));
   }
 
