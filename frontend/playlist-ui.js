@@ -27,16 +27,6 @@
   status.className = "playlist-search-status";
   playlistView.insertBefore(status, playlistList);
 
-  // Acquisition status lives in the device footer and is collapsed by default.
-  const footer = document.createElement("footer");
-  footer.className = "app-footer";
-  footer.innerHTML = `
-    <div id="acquisitionPanel" class="acquisition-panel">
-      <button type="button" id="acquisitionToggle" aria-expanded="false">Acquisition status <span>▸</span></button>
-      <div id="acquisitionBody" hidden><div class="acq-empty">No acquisition activity.</div></div>
-    </div>`;
-  document.querySelector(".device")?.appendChild(footer);
-
   function filtered() {
     const q = query.trim().toLowerCase();
     return q ? rows.filter(t => [t.title,t.artist,t.album,t.isrc,t.source,t.source_id]
@@ -67,6 +57,12 @@
     } catch {}
   }
 
+  function showPlayer() {
+    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+    const nowPlaying = document.getElementById("view-nowplaying");
+    if (nowPlaying) nowPlaying.classList.add("active");
+  }
+
   async function startSearchQueue() {
     const list = filtered();
     if (!list.length) return;
@@ -76,24 +72,21 @@
       if (clear) searchQueue = [];
     }
 
-    // Simple queue semantics: either replace the queue or append the results.
     searchQueue.push(...list);
     queueIndex = searchQueue.length - list.length + selected;
-    playQueueItem();
+
+    if (window.__playSearchQueue) {
+      window.__playSearchQueue(searchQueue, queueIndex);
+    } else {
+      const track = searchQueue[queueIndex];
+      if (track?.id != null) {
+        audio.src = `${API}/playback/${encodeURIComponent(track.id)}`;
+        audio.play().catch(() => {});
+      }
+    }
+    showPlayer();
   }
 
-  function playQueueItem() {
-    const track = searchQueue[queueIndex];
-    if (!track) return;
-    const id = track.id ?? track.track_id;
-    if (id == null) return;
-    audio.src = `${API}/playback/${encodeURIComponent(id)}`;
-    audio.play().catch(() => {});
-  }
-
-  // Search results are selected first. The iPod centre button is the action.
-  // Capture the click so the normal app selection handler does not play the
-  // old playlist row directly.
   center?.addEventListener("click", e => {
     if (document.getElementById("view-playlist")?.classList.contains("active") && query.trim()) {
       e.stopImmediatePropagation();
@@ -102,23 +95,29 @@
   }, true);
 
   next?.addEventListener("click", e => {
-    if (searchQueue.length && document.getElementById("view-playlist")?.classList.contains("active")) {
+    if (searchQueue.length && document.getElementById("view-nowplaying")?.classList.contains("active")) {
       e.stopImmediatePropagation();
-      if (queueIndex < searchQueue.length - 1) { queueIndex++; playQueueItem(); }
+      if (queueIndex < searchQueue.length - 1) {
+        queueIndex++;
+        if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
+      }
     }
   }, true);
 
   prev?.addEventListener("click", e => {
-    if (searchQueue.length && document.getElementById("view-playlist")?.classList.contains("active")) {
+    if (searchQueue.length && document.getElementById("view-nowplaying")?.classList.contains("active")) {
       e.stopImmediatePropagation();
-      if (queueIndex > 0) { queueIndex--; playQueueItem(); }
+      if (queueIndex > 0) {
+        queueIndex--;
+        if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
+      }
     }
   }, true);
 
   audio.addEventListener("ended", () => {
     if (searchQueue.length && queueIndex < searchQueue.length - 1) {
       queueIndex++;
-      playQueueItem();
+      if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
     }
   });
 
@@ -126,6 +125,15 @@
   search.addEventListener("keydown", e => {
     if (e.key === "Escape") { search.value = ""; query = ""; selected = 0; render(); }
   });
+
+  const footer = document.createElement("footer");
+  footer.className = "app-footer";
+  footer.innerHTML = `
+    <div id="acquisitionPanel" class="acquisition-panel">
+      <button type="button" id="acquisitionToggle" aria-expanded="false">Acquisition status <span>▸</span></button>
+      <div id="acquisitionBody" hidden><div class="acq-empty">No acquisition activity.</div></div>
+    </div>`;
+  document.querySelector(".device")?.appendChild(footer);
 
   document.getElementById("acquisitionToggle")?.addEventListener("click", () => {
     const body = document.getElementById("acquisitionBody");
