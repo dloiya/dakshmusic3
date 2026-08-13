@@ -353,7 +353,7 @@ export default {
 
     if (path === "/api/v1/playlist" && req.method === "GET") {
       const response = await worker.fetch(req, env, ctx);
-      if (response.ok) try { await warmWorkingCache(env, ctx); } catch (e) { console.error("Cache warm failed", e); }
+      if (response.ok) ctx.waitUntil(warmWorkingCache(env, ctx).catch(e => console.error("Cache warm failed", e)));
       return response;
     }
 
