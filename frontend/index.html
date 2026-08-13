@@ -7,30 +7,20 @@
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
-    body {
-      margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-      background: #0b0d10; color: #f4f6f8;
-    }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #0b0d10; color: #f4f6f8; }
     .wrap { max-width: 1000px; margin: auto; padding: 28px 18px 100px; }
     h1 { margin: 0 0 6px; font-size: 30px; }
     .muted { color: #8f98a3; }
-    .card {
-      background: #14181d; border: 1px solid #252b32; border-radius: 14px;
-      padding: 18px; margin-top: 18px;
-    }
-    input, button {
-      border: 1px solid #303740; border-radius: 9px; padding: 11px 13px;
-      background: #0f1216; color: inherit; font: inherit;
-    }
+    .card { background: #14181d; border: 1px solid #252b32; border-radius: 14px; padding: 18px; margin-top: 18px; }
+    input, button { border: 1px solid #303740; border-radius: 9px; padding: 11px 13px; background: #0f1216; color: inherit; font: inherit; }
     input { width: 100%; }
     button { cursor: pointer; background: #1d252e; }
     button:hover { background: #27313b; }
+    button.danger { background: #321b1b; }
     .row { display: flex; gap: 10px; }
     .row input { flex: 1; }
-    .result, .track {
-      display: flex; align-items: center; gap: 12px; padding: 12px 0;
-      border-bottom: 1px solid #252b32;
-    }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    .result, .track { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #252b32; }
     .result:last-child, .track:last-child { border-bottom: 0; }
     img.art { width: 52px; height: 52px; object-fit: cover; border-radius: 7px; background: #222; }
     .info { flex: 1; min-width: 0; }
@@ -38,14 +28,17 @@
     .meta { color: #8f98a3; font-size: 13px; margin-top: 3px; }
     .status { margin-top: 10px; color: #9aa5b1; min-height: 20px; }
     .hidden { display: none; }
-    .pill { font-size: 12px; color: #9aa5b1; }
+    .pill { font-size: 12px; color: #9aa5b1; min-width: 24px; text-align: center; }
+    .track-actions { display: flex; gap: 5px; }
+    .track-actions button { padding: 7px 9px; }
     audio { width: 100%; margin-top: 16px; }
+    .file-input { max-width: 100%; }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Personal Music Server</h1>
-  <div class="muted">Sample frontend for the Cloudflare Worker backend</div>
+  <div class="muted">Cloudflare Worker + R2 music library</div>
 
   <section id="loginCard" class="card">
     <h2>Login</h2>
@@ -69,7 +62,13 @@
 
     <section class="card">
       <h2>Playlist</h2>
-      <button onclick="loadPlaylist()">Refresh</button>
+      <div class="toolbar">
+        <button onclick="loadPlaylist()">Refresh</button>
+        <button onclick="document.getElementById('playlistFile').click()">Import Apple Music CSV</button>
+        <button class="danger" onclick="clearPlaylist()">Clear Playlist</button>
+        <input id="playlistFile" class="hidden file-input" type="file" accept=".csv,text/csv" onchange="importAppleMusicCSV(event)">
+      </div>
+      <div class="muted">Export your Apple Music playlist as CSV, then import that file here.</div>
       <div id="playlistStatus" class="status"></div>
       <div id="playlist"></div>
       <audio id="player" controls></audio>
@@ -141,10 +140,7 @@ async function search() {
 
 async function addTrack(item) {
   try {
-    await request("/playlist", {
-      method: "POST",
-      body: JSON.stringify(item)
-    });
+    await request("/playlist", { method: "POST", body: JSON.stringify(item) });
     loadPlaylist();
   } catch (e) {
     alert(e.message);
@@ -168,8 +164,18 @@ async function loadPlaylist() {
           <div class="title">${escapeHtml(track.title || "")}</div>
           <div class="meta">${escapeHtml(track.artist || "")} · ${escapeHtml(track.album || "")}</div>
         </div>
-        <button>Play</button>`;
-      row.querySelector("button").onclick = () => playTrack(track.id);
+        <div class="track-actions">
+          <button title="Move up">↑</button>
+          <button title="Move down">↓</button>
+          <button title="Play">▶</button>
+          <button class="danger" title="Remove">×</button>
+        </div>`;
+
+      const buttons = row.querySelectorAll("button");
+      buttons[0].onclick = () => moveTrack(track.entry_id, track.position - 1);
+      buttons[1].onclick = () => moveTrack(track.entry_id, track.position + 1);
+      buttons[2].onclick = () => playTrack(track.id);
+      buttons[3].onclick = () => removeTrack(track.entry_id);
       box.appendChild(row);
     }
   } catch (e) {
@@ -177,10 +183,126 @@ async function loadPlaylist() {
   }
 }
 
+async function moveTrack(entryId, position) {
+  try {
+    await request("/playlist/" + encodeURIComponent(entryId), {
+      method: "PATCH",
+      body: JSON.stringify({ position })
+    });
+    await loadPlaylist();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function removeTrack(entryId) {
+  if (!confirm("Remove this track from the playlist?")) return;
+  try {
+    await request("/playlist/" + encodeURIComponent(entryId), { method: "DELETE" });
+    await loadPlaylist();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function clearPlaylist() {
+  if (!confirm("Clear the entire playlist? This does not delete the R2 audio files.")) return;
+  try {
+    await request("/playlist", { method: "DELETE" });
+    await loadPlaylist();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 function playTrack(id) {
   const player = document.getElementById("player");
   player.src = api + "/playback/" + encodeURIComponent(id);
   player.play().catch(() => {});
+}
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else {
+      if (c === '"') quoted = true;
+      else if (c === ',') { row.push(field); field = ""; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+      else if (c !== '\r') field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function findColumn(headers, names) {
+  const normalized = headers.map(h => String(h).trim().toLowerCase().replace(/[^a-z0-9]/g, ""));
+  for (const name of names) {
+    const idx = normalized.indexOf(name.replace(/[^a-z0-9]/g, ""));
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+async function importAppleMusicCSV(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+
+  const status = document.getElementById("playlistStatus");
+  try {
+    const text = await file.text();
+    const rows = parseCSV(text);
+    if (rows.length < 2) throw new Error("CSV is empty or has no data rows");
+
+    const headers = rows[0];
+    const titleIdx = findColumn(headers, ["songname", "song", "trackname", "track", "name", "title"]);
+    const artistIdx = findColumn(headers, ["artistname", "artist", "artistname"]);
+    const albumIdx = findColumn(headers, ["albumname", "album"]);
+    const urlIdx = findColumn(headers, ["songurl", "trackurl", "url", "applemusicurl"]);
+
+    if (titleIdx < 0 || artistIdx < 0) {
+      throw new Error("Could not find song/title and artist columns in the CSV");
+    }
+
+    const items = rows.slice(1)
+      .map(r => ({
+        title: (r[titleIdx] || "").trim(),
+        artist: (r[artistIdx] || "").trim(),
+        album: albumIdx >= 0 ? (r[albumIdx] || "").trim() : null,
+        source_url: urlIdx >= 0 ? (r[urlIdx] || "").trim() : null,
+        source: "apple_music",
+        source_id: urlIdx >= 0 ? (r[urlIdx] || "").trim() : null
+      }))
+      .filter(x => x.title && x.artist);
+
+    if (!items.length) throw new Error("No usable tracks found in the CSV");
+
+    let imported = 0;
+    for (const item of items) {
+      status.textContent = `Importing ${imported + 1}/${items.length}: ${item.title}`;
+      try {
+        await request("/playlist", {
+          method: "POST",
+          body: JSON.stringify(item)
+        });
+        imported++;
+      } catch (e) {
+        console.warn("Failed to import", item, e);
+      }
+    }
+
+    status.textContent = `Imported ${imported}/${items.length} track(s)`;
+    await loadPlaylist();
+  } catch (e) {
+    status.textContent = e.message;
+  }
 }
 
 function escapeHtml(value) {
