@@ -1113,17 +1113,18 @@ async function playback(
       `
       SELECT
         t.*,
-        g.drive_file_id AS storage_key
+        COALESCE(
+          (SELECT drive_file_id FROM general_cache WHERE track_id = t.id),
+          (SELECT drive_file_id FROM album_cache WHERE track_id = t.id AND status = 'complete' AND drive_file_id IS NOT NULL LIMIT 1)
+        ) AS storage_key
       FROM tracks t
-      JOIN general_cache g
-        ON g.track_id = t.id
       WHERE t.id = ?
       `
     )
       .bind(trackId)
       .first();
 
-  if (!row) {
+  if (!row || !row.storage_key) {
     return json(
       {
         error:

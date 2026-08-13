@@ -112,8 +112,8 @@ async function refreshTopPlayed(env) {
   return results;
 }
 
-async function dispatchWarm(env, trackId) {
-  const existing = await env.DB.prepare(`SELECT id, created_at FROM download_jobs WHERE track_id=? AND kind='general' AND status IN ('queued','dispatched','running') ORDER BY created_at DESC LIMIT 1`).bind(trackId).first();
+async function dispatchWarm(env, trackId, kind = "general") {
+  const existing = await env.DB.prepare(`SELECT id, created_at FROM download_jobs WHERE track_id=? AND status IN ('queued','dispatched','running') ORDER BY created_at DESC LIMIT 1`).bind(trackId).first();
   if (existing) {
     const ageMs = Date.now() - new Date(existing.created_at.replace(" ", "T") + "Z").getTime();
     if (ageMs < 20 * 60 * 1000) return existing.id;
@@ -124,7 +124,7 @@ async function dispatchWarm(env, trackId) {
   if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
   if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);
   const id = crypto.randomUUID();
-  await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,'general','queued')`).bind(id, trackId).run();
+  await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,?,'queued')`).bind(id, trackId, kind).run();
   const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/acquire-audio.yml/dispatches`, {
     method: "POST",
     headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${env.GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "personal-music-server", "Content-Type": "application/json" },
@@ -388,7 +388,7 @@ async function cacheWholeAlbum(env, albumId, name, artist, trackIds) {
 
     await env.DB.prepare(`INSERT OR REPLACE INTO album_cache(session_id,track_id,status,last_accessed_at) VALUES(?,?,'queued',CURRENT_TIMESTAMP)`)
       .bind(session.id, trackId).run();
-    try { await dispatchWarm(env, trackId); }
+    try { await dispatchWarm(env, trackId, "album"); }
     catch (e) {
       const t = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(trackId).first();
       console.error("Album cache acquisition dispatch failed", t?.natural_key || trackId, e);
