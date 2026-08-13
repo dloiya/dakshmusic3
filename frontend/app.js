@@ -508,6 +508,22 @@
     setNpState("Loading…");
     audio.src = `${API}/playback/${encodeURIComponent(id)}`;
     audio.play().catch(() => {});
+    prefetchNext();
+  }
+
+  function prefetchNext() {
+    const n = neighborTrack(1);
+    if (!n || n.id == null) return;
+    // Best-effort, fire-and-forget: kick off server-side acquisition if the
+    // next track isn't cached yet (no-op if it already is or is already in
+    // progress), and nudge the on-device cache to warm it too. Starting
+    // this as soon as the current track begins gives it the current
+    // track's whole runtime to finish before it's actually needed.
+    acquireTrack(n.id).catch(() => {});
+    fetch(`${API}/playback/${encodeURIComponent(n.id)}`, {
+      credentials: "include",
+      headers: { Range: "bytes=0-0", "X-Cache-Warm": "1" },
+    }).catch(() => {});
   }
 
   audio.addEventListener("error", async () => {
