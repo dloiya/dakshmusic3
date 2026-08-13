@@ -110,7 +110,7 @@
       </li>
     `).join("");
     const sel = listEl.querySelector("li.sel");
-    if (sel) sel.scrollIntoView({ block: "nearest" });
+    if (sel) sel.scrollIntoView({ block: "nearest", behavior: "smooth" });
     listEl.querySelectorAll("li[data-i]").forEach(li => {
       li.addEventListener("click", (e) => {
         if (e.target.closest("[data-stop]")) return;
@@ -630,8 +630,8 @@
   btnPlay.addEventListener("click", onPlayBtn);
   btnCenter.addEventListener("click", selectCurrent);
 
-  let dragging = false, lastAngle = 0, accum = 0;
-  const TICK_DEG = 20;
+  let dragging = false, lastAngle = 0, accum = 0, lastTickTime = 0;
+  const TICK_DEG = 15;
 
   function angleFromEvent(e) {
     const r = wheel.getBoundingClientRect();
@@ -640,9 +640,21 @@
     return Math.atan2(p.clientY - cy, p.clientX - cx) * (180 / Math.PI);
   }
 
+  // How many rows one tick should move, scaled by how fast the wheel is
+  // spinning -- mirrors a real click wheel's acceleration: slow spins move
+  // one row at a time, fast spins fly through many.
+  function stepForSpeed(now) {
+    const msSinceLastTick = now - lastTickTime;
+    lastTickTime = now;
+    if (msSinceLastTick < 40) return 5;
+    if (msSinceLastTick < 80) return 3;
+    if (msSinceLastTick < 150) return 2;
+    return 1;
+  }
+
   function wheelStart(e) {
     if (e.target.closest(".zone") || e.target.closest(".center-btn")) return;
-    dragging = true; accum = 0;
+    dragging = true; accum = 0; lastTickTime = 0;
     lastAngle = angleFromEvent(e);
   }
   function wheelMove(e) {
@@ -653,15 +665,18 @@
     if (diff < -180) diff += 360;
     lastAngle = a;
     accum += diff;
+    const now = performance.now();
     while (accum >= TICK_DEG) {
       accum -= TICK_DEG;
+      const step = stepForSpeed(now);
       if (current()?.kind === "nowplaying") { audio.volume = Math.min(1, audio.volume + 0.05); showVolume(); }
-      else moveSelection(1);
+      else moveSelection(step);
     }
     while (accum <= -TICK_DEG) {
       accum += TICK_DEG;
+      const step = stepForSpeed(now);
       if (current()?.kind === "nowplaying") { audio.volume = Math.max(0, audio.volume - 0.05); showVolume(); }
-      else moveSelection(-1);
+      else moveSelection(-step);
     }
     e.preventDefault();
   }
