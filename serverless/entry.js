@@ -319,6 +319,24 @@ async function playlistMutation(env, req, entryId) {
   return json({ ok: true, position: target });
 }
 
+async function listStoredAlbums(env, req) {
+  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+  const { results } = await env.DB.prepare(`
+    SELECT
+      s.id AS session_id,
+      s.source_album_id AS album_id,
+      s.name AS title,
+      s.artist,
+      s.created_at,
+      s.last_accessed_at,
+      (SELECT COUNT(*) FROM album_cache c WHERE c.session_id = s.id) AS total_tracks,
+      (SELECT COUNT(*) FROM album_cache c WHERE c.session_id = s.id AND c.status = 'complete') AS ready_tracks
+    FROM album_sessions s
+    ORDER BY s.last_accessed_at DESC
+  `).all();
+  return json({ items: results || [] });
+}
+
 async function albumSearch(env, req) {
   if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
   const url = new URL(req.url);
@@ -544,6 +562,7 @@ export default {
     if (path === "/api/v1/apple-music/import" && req.method === "POST") return appleImport(env, req, ctx);
 
     if (path === "/api/v1/albums/search" && req.method === "GET") return albumSearch(env, req);
+    if (path === "/api/v1/albums/stored" && req.method === "GET") return listStoredAlbums(env, req);
     const albumMatch = path.match(/^\/api\/v1\/albums\/([^/]+)$/);
     if (albumMatch && req.method === "GET") return albumDetail(env, req, albumMatch[1], ctx);
 

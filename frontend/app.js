@@ -34,6 +34,7 @@
   const appleMusicImport = (items) => api("/apple-music/import", { method: "POST", body: JSON.stringify({ items }) });
   const clearAllData = (password) => api("/admin/clear-all", { method: "POST", body: JSON.stringify({ password }) });
   const searchAlbums = (q) => api("/albums/search?q=" + encodeURIComponent(q));
+  const getStoredAlbums = () => api("/albums/stored");
   const getAlbum = (id) => api("/albums/" + encodeURIComponent(id));
   const acquireTrack = (trackId) => api(`/tracks/${encodeURIComponent(trackId)}/acquire`, { method: "POST" });
   const getJob = (jobId) => api("/jobs/" + encodeURIComponent(jobId));
@@ -346,8 +347,33 @@
   /* ---------- albums ---------- */
 
   function openAlbums() {
-    push({ key: "albums", title: "Albums", kind: "field", onGo: runAlbumSearch });
+    push({
+      key: "albumsmenu", title: "Albums", kind: "menu", selected: 0,
+      items: [
+        { label: "Search Albums", action: openAlbumSearchField },
+        { label: "Stored Albums", action: openStoredAlbums },
+      ],
+    });
+  }
+
+  function openAlbumSearchField() {
+    push({ key: "albums", title: "Search Albums", kind: "field", onGo: runAlbumSearch });
     setTimeout(() => document.getElementById("albumInput").focus(), 50);
+  }
+
+  async function openStoredAlbums() {
+    const s = { key: "storedalbums", title: "Stored Albums", kind: "menu", selected: 0, items: [], emptyText: "No albums cached yet.\nOpen one from Search Albums to cache it." };
+    push(s);
+    try {
+      const d = await getStoredAlbums();
+      s.items = (d.items || []).map(a => ({
+        label: a.title || "Untitled Album",
+        sub: `${a.artist || "Unknown artist"} · ${a.ready_tracks}/${a.total_tracks} ready`,
+        action: () => openAlbumDetail(a.album_id),
+      }));
+      if (!s.items.length) s.emptyText = "No albums cached yet.\nOpen one from Search Albums to cache it.";
+    } catch (e) { s.emptyText = e.message; }
+    renderMenu(s);
   }
 
   async function runAlbumSearch() {
