@@ -72,3 +72,16 @@ jobs:
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
         run: |
           python3 .github/scripts/upload_r2.py /tmp/output.flac
+
+      - name: Report failure
+        if: failure()
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+        run: |
+          curl -sS -X POST "$WORKER_BASE_URL/api/v1/jobs/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: $CALLBACK_SECRET" \
+            -d "{\"job_id\":\"$JOB_ID\",\"status\":\"failed\",\"error\":\"Workflow run failed: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+          || true

@@ -42,8 +42,15 @@ async function refreshTopPlayed(env) {
 }
 
 async function dispatchWarm(env, trackId) {
-  const existing = await env.DB.prepare(`SELECT id FROM download_jobs WHERE track_id=? AND kind='general' AND status IN ('queued','dispatched','running') ORDER BY created_at DESC LIMIT 1`).bind(trackId).first();
-  if (existing) return existing.id;
+  const existing = await env.DB.prepare(`SELECT id, created_at FROM download_jobs WHERE track_id=? AND kind='general' AND status IN ('queued','dispatched','running') ORDER BY created_at DESC LIMIT 1`).bind(trackId).first();
+  if (existing) {
+    const ageMs = Date.now() - new Date(existing.created_at.replace(" ", "T") + "Z").getTime();
+    if (ageMs < 20 * 60 * 1000) return existing.id;
+    // Stale: the workflow never reported completion or failure (e.g. it crashed,
+    // was cancelled, or the callback never arrived). Mark it dead so a track
+    // doesn't get stuck unacquirable forever, then fall through to dispatch fresh.
+    await env.DB.prepare(`UPDATE download_jobs SET status='failed',error='Timed out waiting for the acquisition workflow',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(existing.id).run();
+  }
   const track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(trackId).first();
   if (!track?.source_url) return null;
   if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
