@@ -1,5 +1,5 @@
 name = "dakshmusic3"
-main = "worker.js"
+main = "entry.js"
 compatibility_date = "2026-07-01"
 account_id = "ed9504226c687dce2353fbc23a1d5890"
 workers_dev = true
@@ -39,4 +39,3 @@ invocation_logs = true
 [observability.traces]
 enabled = true
 persist = true
-head_sampling_rate = 1
