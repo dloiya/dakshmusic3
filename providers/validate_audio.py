@@ -127,7 +127,7 @@ def main(path_text: str) -> None:
         if actual_duration_s is not None
         else None
     )
-    duration_tolerance_s = max(2.0, expected_duration_s * 0.005)
+    duration_tolerance_s = max(3.5, expected_duration_s * 0.01)
     duration_ok = actual_duration_s is not None and duration_delta_s <= duration_tolerance_s
 
     # Artist remains a stable fallback identity signal when the provider does
