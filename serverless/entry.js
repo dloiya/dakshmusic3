@@ -54,19 +54,14 @@ function buildNaturalKey(title, artist, album, dateStr) {
 async function findOrPrepareTrack(env, { source, source_id, source_url, title, artist, album, album_id, duration_ms, artwork_url }) {
   let track = source_id ? await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(source_id).first() : null;
   if (!track) {
-    track = await env.DB.prepare(`
-      SELECT * FROM tracks
-      WHERE LOWER(title)=LOWER(?) AND LOWER(artist)=LOWER(?) AND LOWER(COALESCE(album,''))=LOWER(COALESCE(?,''))
-      LIMIT 1
-    `).bind(title, artist || "", album || "").first();
+    track = await env.DB.prepare(`SELECT * FROM tracks WHERE LOWER(title)=LOWER(?) AND LOWER(artist)=LOWER(?) AND LOWER(COALESCE(album,''))=LOWER(COALESCE(?,'')) LIMIT 1`)
+      .bind(title, artist || "", album || "").first();
   }
   if (track) return track;
 
   const naturalKey = buildNaturalKey(title, artist, album, todayDate());
-  const created = await env.DB.prepare(`
-    INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url,natural_key)
-    VALUES(?,?,?,?,?,?,?,?,?,?)
-  `).bind(source || "deezer", source_id || null, source_url || null, title, artist || "", album || null, album_id || null, duration_ms || null, artwork_url || null, naturalKey).run();
+  const created = await env.DB.prepare(`INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url,natural_key) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .bind(source || "deezer", source_id || null, source_url || null, title, artist || "", album || null, album_id || null, duration_ms || null, artwork_url || null, naturalKey).run();
   return await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(created.meta.last_row_id).first();
 }
 
@@ -83,8 +78,7 @@ async function refreshTopPlayed(env) {
   for (let i = 0; i < results.length; i++) {
     const cached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(results[i].id).first();
     const storage = cached?.drive_file_id || oldKeys.get(Number(results[i].id)) || null;
-    await env.DB.prepare(`INSERT INTO top_played_cache(rank,track_id,storage_key,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)`)
-      .bind(i + 1, results[i].id, storage).run();
+    await env.DB.prepare(`INSERT INTO top_played_cache(rank,track_id,storage_key,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)`).bind(i + 1, results[i].id, storage).run();
   }
   return results;
 }
@@ -94,20 +88,25 @@ async function dispatchWarm(env, trackId) {
   if (existing) {
     const ageMs = Date.now() - new Date(existing.created_at.replace(" ", "T") + "Z").getTime();
     if (ageMs < 20 * 60 * 1000) return existing.id;
-    // Stale: the workflow never reported completion or failure (e.g. it crashed,
-    // was cancelled, or the callback never arrived). Mark it dead so a track
-    // doesn't get stuck unacquirable forever, then fall through to dispatch fresh.
     await env.DB.prepare(`UPDATE download_jobs SET status='failed',error='Timed out waiting for the acquisition workflow',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(existing.id).run();
   }
   const track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(trackId).first();
   if (!track?.source_url) return null;
   if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
+  if (!track.duration_ms) throw new Error(`Track ${trackId} has no canonical duration_ms; refusing acquisition without identity data`);
   const id = crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,'general','queued')`).bind(id, trackId).run();
   const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/acquire-audio.yml/dispatches`, {
     method: "POST",
     headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${env.GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "personal-music-server", "Content-Type": "application/json" },
-    body: JSON.stringify({ ref: "main", inputs: { job_id: id, source_url: track.source_url, title: track.title, artist: track.artist || "", album: track.album || "" } }),
+    body: JSON.stringify({ ref: "main", inputs: {
+      job_id: id,
+      source_url: track.source_url,
+      title: track.title,
+      artist: track.artist || "",
+      album: track.album || "",
+      duration_ms: String(track.duration_ms),
+    } }),
   });
   if (!response.ok) {
     const text = await response.text();
@@ -125,7 +124,6 @@ async function warmWorkingCache(env, ctx) {
   const candidates = top.map(r => Number(r.id)).filter(id => !ids.has(id)).slice(0, 25);
   const immediate = candidates.slice(0, 5);
   const backload = candidates.slice(5, 25);
-
   const warmOne = async id => {
     const row = await env.DB.prepare(`SELECT storage_key FROM top_played_cache WHERE track_id=?`).bind(id).first();
     if (row?.storage_key && env.AUDIO_BUCKET) {
@@ -137,7 +135,6 @@ async function warmWorkingCache(env, ctx) {
     }
     try { await dispatchWarm(env, id); } catch (e) { console.error("Working-cache warm failed", id, e); }
   };
-
   for (const id of immediate) await warmOne(id);
   if (backload.length) ctx.waitUntil((async () => { for (const id of backload) await warmOne(id); })());
   return { top100: top.length, immediate: immediate.length, backload: backload.length };
@@ -154,14 +151,10 @@ async function uploadAudio(env, req, jobId) {
   const format = url.searchParams.get("format") || "flac";
   const contentType = req.headers.get("content-type") || (format === "mp3" ? "audio/mpeg" : "audio/flac");
   const storageKey = `${track?.natural_key || `track-${job.track_id}`}.${format}`;
-
   await env.AUDIO_BUCKET.put(storageKey, req.body, { httpMetadata: { contentType } });
-  await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .bind(provider, storageKey, format, contentType, jobId).run();
-
+  await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(provider, storageKey, format, contentType, jobId).run();
   await ensureTopCache(env);
   await env.DB.prepare(`UPDATE top_played_cache SET storage_key=?,updated_at=CURRENT_TIMESTAMP WHERE track_id=?`).bind(storageKey, job.track_id).run();
-
   if (job.kind === "general") {
     await env.DB.prepare(`INSERT OR REPLACE INTO general_cache(track_id,drive_file_id,last_accessed_at) VALUES(?,?,CURRENT_TIMESTAMP)`).bind(job.track_id, storageKey).run();
     const keep = Math.max(1, Number.parseInt(env.GENERAL_CACHE_LIMIT || "25", 10) || 25);
@@ -207,25 +200,13 @@ async function appleImport(env, req, ctx) {
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
   const items = Array.isArray(body?.items) ? body.items : [];
   if (!items.length) return json({ error: "No Apple Music tracks supplied" }, 400);
-
   await ensureTopCache(env);
   const sorted = items.map(x => ({ ...x, play_count: Number(x.play_count || 0) })).sort((a, b) => b.play_count - a.play_count).slice(0, 100);
   const matched = [], unmatched = [];
-
   for (const item of sorted) {
     try {
       const found = await deezerSearch(item.title, item.artist);
       if (!found) { unmatched.push({ title: item.title, artist: item.artist }); continue; }
-      if (found.album?.id) {
-        try {
-          await upsertLightAlbum(env, {
-            source_id: String(found.album.id),
-            title: found.album.title || item.album || null,
-            artist: found.artist?.name || item.artist || null,
-            artwork_url: found.album.cover_xl || found.album.cover_big || null,
-          });
-        } catch (e) { console.error("Album upsert failed (apple import)", found.album.id, e); }
-      }
       const track = await findOrPrepareTrack(env, {
         source: "deezer",
         source_id: String(found.id),
@@ -244,272 +225,46 @@ async function appleImport(env, req, ctx) {
       unmatched.push({ title: item.title, artist: item.artist, error: String(e?.message || e) });
     }
   }
-
   await refreshTopPlayed(env);
   const top = await env.DB.prepare(`SELECT track_id,storage_key FROM top_played_cache ORDER BY rank LIMIT 100`).all();
   const missing = (top.results || []).filter(r => !r.storage_key).map(r => Number(r.track_id));
   ctx.waitUntil((async () => { for (const id of missing) { try { await dispatchWarm(env, id); } catch (e) { console.error("Top-100 acquisition dispatch failed", id, e); } } })());
   let warm = { top100: 0, immediate: 0, backload: 0 };
   try { warm = await warmWorkingCache(env, ctx); } catch (e) { console.error("Post-import warm failed", e); }
-
-  return json({ ok: true, imported: matched.length, unmatched, top100: matched.slice(0, 100), warm });
+  return json({ imported: items.length, matched: matched.length, unmatched, top100: matched.length, queued: missing.length, warm });
 }
 
-async function addPlaylistEntry(env, body) {
-  if (!body?.title) return json({ error: "Track title is required" }, 400);
-  if (body.album_id) {
-    try {
-      await upsertLightAlbum(env, {
-        source_id: body.album_id,
-        title: body.album || null,
-        artist: body.artist || null,
-        artwork_url: body.artwork_url || null,
-      });
-    } catch (e) { console.error("Album upsert failed (playlist add)", body.album_id, e); }
-  }
-  const track = await findOrPrepareTrack(env, body);
-
-  const existingEntry = await env.DB.prepare(`SELECT id, position FROM playlist_entries WHERE track_id=?`).bind(track.id).first();
-  if (existingEntry) {
-    return json({ track_id: track.id, position: existingEntry.position, entry_id: existingEntry.id, already_present: true });
-  }
-
-  const pos = await env.DB.prepare(`SELECT COALESCE(MAX(position),0)+1 AS p FROM playlist_entries`).first();
-  const inserted = await env.DB.prepare(`
-    INSERT INTO playlist_entries(track_id,position,title,artist,album,artwork_url,duration_ms)
-    VALUES(?,?,?,?,?,?,?)
-  `).bind(track.id, pos?.p || 1, track.title, track.artist, track.album, track.artwork_url, track.duration_ms).run();
-  return json({ track_id: track.id, position: pos?.p || 1, entry_id: inserted.meta.last_row_id, already_present: false }, 201);
-}
-
-async function playlistMutation(env, req, entryId) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-  const id = Number(entryId);
-  if (req.method === "DELETE") {
-    const row = await env.DB.prepare(`SELECT position FROM playlist_entries WHERE id=?`).bind(id).first();
-    if (!row) return json({ error: "Playlist entry not found" }, 404);
-    await env.DB.prepare(`DELETE FROM playlist_entries WHERE id=?`).bind(id).run();
-    await env.DB.prepare(`UPDATE playlist_entries SET position=position-1 WHERE position>?`).bind(row.position).run();
-    return json({ ok: true });
-  }
-  let body; try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
-  const row = await env.DB.prepare(`SELECT position FROM playlist_entries WHERE id=?`).bind(id).first();
-  if (!row) return json({ error: "Playlist entry not found" }, 404);
-  const count = Number((await env.DB.prepare(`SELECT COUNT(*) AS count FROM playlist_entries`).first())?.count || 0);
-  const target = Math.min(count, Math.max(1, Number.parseInt(body.position, 10) || 1));
-  if (target < row.position) await env.DB.prepare(`UPDATE playlist_entries SET position=position+1 WHERE position>=? AND position<?`).bind(target, row.position).run();
-  else if (target > row.position) await env.DB.prepare(`UPDATE playlist_entries SET position=position-1 WHERE position>? AND position<=?`).bind(row.position, target).run();
-  await env.DB.prepare(`UPDATE playlist_entries SET position=? WHERE id=?`).bind(target, id).run();
-  return json({ ok: true, position: target });
-}
-
-async function upsertRichAlbum(env, data) {
-  const genre = data.genres?.data?.[0]?.name || null;
-  const artwork = data.cover_xl || data.cover_big || data.cover_medium || null;
-  await env.DB.prepare(`
-    INSERT INTO albums (source, source_id, title, artist, artwork_url, release_date, genre, tracks_count)
-    VALUES ('deezer', ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(source_id) DO UPDATE SET
-      title=excluded.title, artist=excluded.artist, artwork_url=excluded.artwork_url,
-      release_date=excluded.release_date, genre=excluded.genre, tracks_count=excluded.tracks_count,
-      updated_at=CURRENT_TIMESTAMP
-  `).bind(
-    String(data.id), data.title || null, data.artist?.name || null, artwork,
-    data.release_date || null, genre, data.nb_tracks || null
-  ).run();
-}
-
-async function upsertLightAlbum(env, { source_id, title, artist, artwork_url, tracks_count }) {
-  if (!source_id) return;
-  await env.DB.prepare(`
-    INSERT INTO albums (source, source_id, title, artist, artwork_url, tracks_count)
-    VALUES ('deezer', ?, ?, ?, ?, ?)
-    ON CONFLICT(source_id) DO UPDATE SET
-      title=excluded.title, artist=excluded.artist,
-      artwork_url=COALESCE(albums.artwork_url, excluded.artwork_url),
-      tracks_count=COALESCE(albums.tracks_count, excluded.tracks_count),
-      updated_at=CURRENT_TIMESTAMP
-  `).bind(source_id, title || null, artist || null, artwork_url || null, tracks_count || null).run();
-}
-
-async function albumSearch(env, req) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-  const url = new URL(req.url);
-  const q = url.searchParams.get("q");
-  if (!q) return json({ error: "q is required" }, 400);
-  const dz = new URL("https://api.deezer.com/search/album");
-  dz.searchParams.set("q", q);
-  dz.searchParams.set("limit", "25");
-  const response = await fetch(dz);
-  if (!response.ok) return json({ error: `Deezer HTTP ${response.status}` }, 502);
-  const data = await response.json();
-  const items = (data.data || []).map(x => ({
-    album_id: String(x.id),
-    title: x.title,
-    artist: x.artist?.name || null,
-    artwork_url: x.cover_xl || x.cover_big || x.cover_medium || null,
-    tracks_count: x.nb_tracks || null,
-  }));
-  for (const it of items) {
-    try { await upsertLightAlbum(env, { source_id: it.album_id, ...it }); }
-    catch (e) { console.error("Album upsert failed", it.album_id, e); }
-  }
-  return json({ items });
-}
-
-async function albumDetail(env, req, albumId) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-  const response = await fetch(`https://api.deezer.com/album/${encodeURIComponent(albumId)}`);
-  if (!response.ok) return json({ error: `Deezer HTTP ${response.status}` }, 502);
-  const data = await response.json();
-  if (data.error) return json({ error: data.error.message || "Album not found" }, 404);
-  const artwork = data.cover_xl || data.cover_big || data.cover_medium || null;
-  try { await upsertRichAlbum(env, data); } catch (e) { console.error("Rich album upsert failed", albumId, e); }
-
-  const rawTracks = (data.tracks?.data || []).map(x => ({
-    source: "deezer",
-    source_id: String(x.id),
-    source_url: x.link,
-    title: x.title,
-    artist: x.artist?.name || data.artist?.name || null,
-    album: data.title,
-    album_id: String(data.id),
-    duration_ms: (x.duration || 0) * 1000,
-    artwork_url: artwork,
-  }));
-
-  // Resolve each track to a real DB row (so it's directly playable) without
-  // touching playlist_entries -- playing an album is intentionally decoupled
-  // from the user's actual playlist.
-  const tracks = [];
-  for (const rt of rawTracks) {
-    try {
-      const track = await findOrPrepareTrack(env, rt);
-      tracks.push({ ...rt, id: track.id });
-    } catch (e) {
-      console.error("Failed to resolve album track", rt.source_id, e);
-      tracks.push({ ...rt, id: null });
-    }
-  }
-
-  return json({
-    album_id: String(data.id),
-    title: data.title,
-    artist: data.artist?.name || null,
-    artwork_url: artwork,
-    release_date: data.release_date || null,
-    tracks,
-  });
-}
-
-async function acquireTrack(env, req, trackId) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-  const id = Number(trackId);
-  const cached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(id).first();
-  if (cached?.drive_file_id) return json({ cached: true });
-  try {
-    const jobId = await dispatchWarm(env, id);
-    if (!jobId) return json({ error: "Track has no source URL to acquire from" }, 400);
-    return json({ cached: false, job_id: jobId });
-  } catch (e) {
-    return json({ error: String(e?.message || e) }, 502);
-  }
-}
-
-async function clearAllData(env, req) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-
+async function callback(env, req) {
+  const supplied = req.headers.get("X-Callback-Secret");
+  if (!supplied || supplied !== env.CALLBACK_SECRET) return json({ error: "Unauthorized" }, 401);
   let body;
-  try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
-  const password = String(body?.password || "");
-  if (!password) return json({ error: "Password is required" }, 400);
-  if (!env.PASSWORD_HASH || !env.PASSWORD_SALT) return json({ error: "Authentication is not configured" }, 500);
-
-  let actual;
-  try { actual = await pbkdf2(password, env.PASSWORD_SALT); }
-  catch (e) { console.error("Password verification failed", e); return json({ error: "Password verification failed" }, 500); }
-  if (actual !== env.PASSWORD_HASH) return json({ error: "Invalid password" }, 401);
-
-  // Collect every R2 object key before deleting the rows that reference them,
-  // so cached audio doesn't leak in R2 forever once the DB rows are gone.
-  const keys = new Set();
-  for (const table of ["general_cache", "top_played_cache", "album_cache"]) {
-    const col = table === "top_played_cache" ? "storage_key" : "drive_file_id";
-    try {
-      const { results } = await env.DB.prepare(`SELECT ${col} AS k FROM ${table} WHERE ${col} IS NOT NULL`).all();
-      for (const r of results || []) if (r.k) keys.add(r.k);
-    } catch (e) { console.error("Failed to collect R2 keys from", table, e); }
-  }
-
-  // Delete children before parents. Explicit order rather than relying on
-  // ON DELETE CASCADE, so this is correct regardless of whether D1 has
-  // foreign_keys enforcement turned on.
-  const tables = [
-    "album_cache", "album_sessions", "general_cache", "top_played_cache",
-    "download_jobs", "playlist_entries", "albums", "tracks",
-  ];
-  for (const table of tables) {
-    try { await env.DB.prepare(`DELETE FROM ${table}`).run(); }
-    catch (e) { console.error("Failed to clear table", table, e); }
-  }
-
-  let r2Deleted = 0, r2Failed = 0;
-  for (const key of keys) {
-    try { await env.AUDIO_BUCKET.delete(key); r2Deleted++; }
-    catch (e) { r2Failed++; console.error("Failed to delete R2 object during clear-all", key, e); }
-  }
-
-  return json({ ok: true, cleared: true, r2_objects_deleted: r2Deleted, r2_objects_failed: r2Failed });
+  try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  if (!body?.job_id) return json({ error: "job_id is required" }, 400);
+  const job = await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(body.job_id).first();
+  if (!job) return json({ error: "Job not found" }, 404);
+  await env.DB.prepare(`UPDATE download_jobs SET status=?,provider=COALESCE(?,provider),drive_file_id=COALESCE(?,drive_file_id),format=COALESCE(?,format),mime_type=COALESCE(?,mime_type),error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    .bind(body.status || "complete", body.provider || null, body.r2_key || body.drive_file_id || null, body.format || null, body.mime_type || null, body.error || null, body.job_id).run();
+  return json({ ok: true });
 }
 
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
-    const path = url.pathname;
-
-    const audioUploadMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)\/audio$/);
+    const audioUploadMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/audio$/);
     if (audioUploadMatch && (req.method === "PUT" || req.method === "POST")) return uploadAudio(env, req, audioUploadMatch[1]);
-
-    if (path === "/api/v1/apple-music/import" && req.method === "POST") return appleImport(env, req, ctx);
-
-    if (path === "/api/v1/albums/search" && req.method === "GET") return albumSearch(env, req);
-
-    if (path === "/api/v1/admin/clear-all" && req.method === "POST") return clearAllData(env, req);
-
-    const albumMatch = path.match(/^\/api\/v1\/albums\/([^/]+)$/);
-    if (albumMatch && req.method === "GET") return albumDetail(env, req, albumMatch[1]);
-
-    const acquireMatch = path.match(/^\/api\/v1\/tracks\/([0-9]+)\/acquire$/);
-    if (acquireMatch && req.method === "POST") return acquireTrack(env, req, acquireMatch[1]);
-
-    if (path === "/api/v1/playlist" && req.method === "POST") {
+    if (url.pathname === "/api/v1/jobs/callback" && req.method === "POST") return callback(env, req);
+    if (url.pathname === "/api/v1/cache/top/rebuild" && req.method === "POST") {
       if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-      let body; try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
-      return addPlaylistEntry(env, body);
+      const top = await refreshTopPlayed(env);
+      return json({ top100: top.length });
     }
-
-    const entryMatch = path.match(/^\/api\/v1\/playlist\/([0-9]+)$/);
-    if (entryMatch && (req.method === "DELETE" || req.method === "PATCH")) return playlistMutation(env, req, entryMatch[1]);
-
-    if (path === "/api/v1/playlist" && req.method === "GET") {
-      const response = await worker.fetch(req, env, ctx);
-      if (response.ok) ctx.waitUntil(warmWorkingCache(env, ctx).catch(e => console.error("Cache warm failed", e)));
-      return response;
-    }
-
-    if (path === "/api/v1/cache/top" && req.method === "GET") {
+    if (url.pathname === "/api/v1/cache/top" && req.method === "GET") {
       if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-      const ids = await refreshTopPlayed(env);
-      const rows = await env.DB.prepare(`SELECT c.rank,c.storage_key,t.* FROM top_played_cache c JOIN tracks t ON t.id=c.track_id ORDER BY c.rank`).all();
-      return json({ count: ids.length, items: rows.results || [] });
+      await ensureTopCache(env);
+      const result = await env.DB.prepare(`SELECT c.rank,c.track_id,t.title,t.artist,t.album,t.play_count,c.storage_key FROM top_played_cache c JOIN tracks t ON t.id=c.track_id ORDER BY c.rank LIMIT 100`).all();
+      return json({ limit: 100, items: result.results || [] });
     }
-
-    if (path.startsWith("/api/v1/playback/") && req.method === "GET") {
-      const response = await worker.fetch(req, env, ctx);
-      if (response.ok) ctx.waitUntil(refreshTopPlayed(env).catch(e => console.error("Top-played refresh failed", e)));
-      return response;
-    }
-
+    if (url.pathname === "/api/v1/integrations/apple-music/import" && req.method === "POST") return appleImport(env, req, ctx);
     return worker.fetch(req, env, ctx);
   },
 };
