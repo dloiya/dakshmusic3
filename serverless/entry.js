@@ -43,23 +43,23 @@ function slug(s) {
     .replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "unknown";
 }
 
-function todayDate() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function buildNaturalKey(title, artist, album, dateStr) {
-  return `${slug(title)}-${slug(artist)}-${slug(album || "unknown")}-${dateStr}`;
+function buildNaturalKey(title, artist, album, source, sourceId, durationMs) {
+  const base = `${slug(title)}-${slug(artist)}-${slug(album || "unknown")}`;
+  const identity = sourceId ? `${slug(source || "source")}-${slug(sourceId)}` : `duration-${Math.max(0, Number(durationMs) || 0)}`;
+  return `${base}-${identity}`;
 }
 
 async function findOrPrepareTrack(env, { source, source_id, source_url, title, artist, album, album_id, duration_ms, artwork_url }) {
-  let track = source_id ? await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(source_id).first() : null;
+  let track = source_id
+    ? await env.DB.prepare(`SELECT * FROM tracks WHERE source=? AND source_id=?`).bind(source || "deezer", source_id).first()
+    : null;
   if (!track) {
-    track = await env.DB.prepare(`SELECT * FROM tracks WHERE LOWER(title)=LOWER(?) AND LOWER(artist)=LOWER(?) AND LOWER(COALESCE(album,''))=LOWER(COALESCE(?,'')) LIMIT 1`)
-      .bind(title, artist || "", album || "").first();
+    track = await env.DB.prepare(`SELECT * FROM tracks WHERE LOWER(title)=LOWER(?) AND LOWER(artist)=LOWER(?) AND LOWER(COALESCE(album,''))=LOWER(COALESCE(?,'')) AND (duration_ms IS NULL OR ? IS NULL OR ABS(duration_ms-?)<=5000) LIMIT 1`)
+      .bind(title, artist || "", album || "", duration_ms || null, duration_ms || null).first();
   }
   if (track) return track;
 
-  const naturalKey = buildNaturalKey(title, artist, album, todayDate());
+  const naturalKey = buildNaturalKey(title, artist, album, source, source_id, duration_ms);
   const created = await env.DB.prepare(`INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url,natural_key) VALUES(?,?,?,?,?,?,?,?,?,?)`)
     .bind(source || "deezer", source_id || null, source_url || null, title, artist || "", album || null, album_id || null, duration_ms || null, artwork_url || null, naturalKey).run();
   return await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(created.meta.last_row_id).first();
@@ -177,14 +177,31 @@ async function uploadAudio(env, req, jobId) {
   if (!supplied || supplied !== env.CALLBACK_SECRET) return json({ error: "Unauthorized" }, 401);
   const job = await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(jobId).first();
   if (!job) return json({ error: "Job not found" }, 404);
-  const track = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(job.track_id).first();
+  if (!["queued", "dispatched", "running"].includes(job.status)) return json({ error: `Job is not uploadable from status ${job.status}` }, 409);
+
   const url = new URL(req.url);
   const provider = url.searchParams.get("provider") || null;
-  const format = url.searchParams.get("format") || "flac";
+  const format = (url.searchParams.get("format") || "flac").toLowerCase();
+  if (!["flac", "mp3"].includes(format)) return json({ error: "Unsupported audio format" }, 400);
   const contentType = req.headers.get("content-type") || (format === "mp3" ? "audio/mpeg" : "audio/flac");
+  if (!contentType.startsWith("audio/")) return json({ error: "Invalid audio content type" }, 400);
+  const contentLength = Number(req.headers.get("content-length") || 0);
+  const maxUploadBytes = Math.max(1, Number.parseInt(env.MAX_UPLOAD_BYTES || "104857600", 10) || 104857600);
+  if (contentLength && contentLength > maxUploadBytes) return json({ error: "Audio upload exceeds configured size limit" }, 413);
+
+  const claimed = await env.DB.prepare(`UPDATE download_jobs SET status='running',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('queued','dispatched','running')`).bind(jobId).run();
+  if (!claimed.meta?.changes) return json({ error: "Job is no longer accepting uploads" }, 409);
+
+  const track = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(job.track_id).first();
   const storageKey = `${track?.natural_key || `track-${job.track_id}`}.${format}`;
-  await env.AUDIO_BUCKET.put(storageKey, req.body, { httpMetadata: { contentType } });
-  await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(provider, storageKey, format, contentType, jobId).run();
+  try {
+    await env.AUDIO_BUCKET.put(storageKey, req.body, { httpMetadata: { contentType } });
+    await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`).bind(provider, storageKey, format, contentType, jobId).run();
+  } catch (e) {
+    await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`).bind(String(e?.message || e), jobId).run();
+    throw e;
+  }
+
   await ensureTopCache(env);
   await env.DB.prepare(`UPDATE top_played_cache SET storage_key=?,updated_at=CURRENT_TIMESTAMP WHERE track_id=?`).bind(storageKey, job.track_id).run();
   if (job.kind === "general") {
@@ -372,10 +389,6 @@ async function cacheWholeAlbum(env, albumId, name, artist, trackIds) {
       .bind(sessionId, albumId, name || "Unknown Album", artist || null).run();
     session = { id: sessionId };
 
-    // LRU: evict the least-recently-accessed album first, matching
-    // general_cache's eviction policy. last_accessed_at is bumped
-    // whenever an already-cached album is reopened (see the else branch
-    // below), so re-opening a cached album protects it from eviction.
     const old = await env.DB.prepare(`SELECT id FROM album_sessions ORDER BY last_accessed_at DESC LIMIT -1 OFFSET ?`).bind(limit).all();
     for (const row of old.results || []) {
       const tracks = await env.DB.prepare(`SELECT drive_file_id FROM album_cache WHERE session_id=?`).bind(row.id).all();
@@ -438,9 +451,6 @@ async function albumDetail(env, req, albumId, ctx) {
     artwork_url: artwork,
   }));
 
-  // Resolve each track to a real DB row (so it's directly playable) without
-  // touching playlist_entries -- playing an album is intentionally decoupled
-  // from the user's actual playlist.
   const tracks = [];
   for (const rt of rawTracks) {
     try {
@@ -533,8 +543,12 @@ async function callback(env, req) {
   if (!body?.job_id) return json({ error: "job_id is required" }, 400);
   const job = await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(body.job_id).first();
   if (!job) return json({ error: "Job not found" }, 404);
-  await env.DB.prepare(`UPDATE download_jobs SET status=?,provider=COALESCE(?,provider),drive_file_id=COALESCE(?,drive_file_id),format=COALESCE(?,format),mime_type=COALESCE(?,mime_type),error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .bind(body.status || "complete", body.provider || null, body.r2_key || body.drive_file_id || null, body.format || null, body.mime_type || null, body.error || null, body.job_id).run();
+  const nextStatus = body.status || "complete";
+  if (!["failed", "complete"].includes(nextStatus)) return json({ error: "Invalid callback status" }, 400);
+  if (!["queued", "dispatched", "running"].includes(job.status)) return json({ error: `Job is already terminal: ${job.status}` }, 409);
+  const result = await env.DB.prepare(`UPDATE download_jobs SET status=?,provider=COALESCE(?,provider),drive_file_id=COALESCE(?,drive_file_id),format=COALESCE(?,format),mime_type=COALESCE(?,mime_type),error=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('queued','dispatched','running')`)
+    .bind(nextStatus, body.provider || null, body.r2_key || body.drive_file_id || null, body.format || null, body.mime_type || null, body.error || null, body.job_id).run();
+  if (!result.meta?.changes) return json({ error: "Job state changed before callback was accepted" }, 409);
   return json({ ok: true });
 }
 
