@@ -22,12 +22,16 @@
   status.className = "playlist-search-status";
   playlistView.insertBefore(status, playlistList);
 
-  const panel = document.createElement("div");
-  panel.id = "acquisitionPanel";
-  panel.innerHTML = `
-    <button type="button" id="acquisitionToggle" aria-expanded="false">Acquisition status <span>▸</span></button>
-    <div id="acquisitionBody" hidden><div class="acq-empty">No acquisition activity.</div></div>`;
-  document.querySelector(".device")?.insertAdjacentElement("afterend", panel);
+  // Acquisition status lives in the device footer and is collapsed/hidden
+  // until explicitly opened, keeping the main player UI clean.
+  const footer = document.createElement("footer");
+  footer.className = "app-footer";
+  footer.innerHTML = `
+    <div id="acquisitionPanel" class="acquisition-panel">
+      <button type="button" id="acquisitionToggle" aria-expanded="false">Acquisition status <span>▸</span></button>
+      <div id="acquisitionBody" hidden><div class="acq-empty">No acquisition activity.</div></div>
+    </div>`;
+  document.querySelector(".device")?.appendChild(footer);
 
   function filtered() {
     const q = query.trim().toLowerCase();
@@ -112,10 +116,11 @@
       .playlist-search{margin:5px 8px 2px;width:calc(100% - 16px);padding:6px 8px;border:1px solid #b9bdb8;border-radius:5px;background:#fff;color:var(--screen-ink);font:inherit;font-size:11px;outline:none}
       .playlist-search:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
       .playlist-search-status{font-size:9px;color:var(--screen-sub);padding:1px 9px 3px}
-      #acquisitionPanel{width:300px;margin:10px auto 0;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif}
-      #acquisitionToggle{width:100%;border:1px solid #cfcdc7;border-radius:8px;background:#f2f1ee;color:#5b625d;padding:7px 9px;text-align:left;font:600 11px inherit;cursor:pointer;box-shadow:0 2px 5px rgba(0,0,0,.12)}
-      #acquisitionBody{margin-top:4px;background:#f2f1ee;border:1px solid #cfcdc7;border-radius:8px;padding:6px;max-height:180px;overflow:auto;box-shadow:0 2px 5px rgba(0,0,0,.12)}
-      .acq-row{position:relative;padding:6px 5px;border-bottom:1px solid rgba(0,0,0,.07);font-size:10px;color:#1b1f1c}.acq-row:last-child{border-bottom:0}.acq-row strong{display:block}.acq-row small{display:block;color:#5b625d;margin-top:1px}.acq-row>span{position:absolute;right:5px;top:7px;font-size:9px;color:#5b625d}.acq-row.failed>span{color:#b34c3c}.acq-error{margin-top:4px;color:#b34c3c;white-space:pre-wrap;word-break:break-word}.acq-empty{padding:8px;text-align:center;color:#5b625d;font-size:10px}
+      .app-footer{width:100%;margin-top:10px;padding-top:6px;border-top:1px solid rgba(0,0,0,.08)}
+      .acquisition-panel{width:100%;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif}
+      #acquisitionToggle{width:100%;border:1px solid #cfcdc7;border-radius:6px;background:#e9e7e2;color:#5b625d;padding:5px 8px;text-align:left;font:600 10px inherit;cursor:pointer}
+      #acquisitionBody{margin-top:4px;background:#f2f1ee;border:1px solid #cfcdc7;border-radius:6px;padding:5px;max-height:140px;overflow:auto}
+      .acq-row{position:relative;padding:5px 4px;border-bottom:1px solid rgba(0,0,0,.07);font-size:9.5px;color:#1b1f1c}.acq-row:last-child{border-bottom:0}.acq-row strong{display:block}.acq-row small{display:block;color:#5b625d;margin-top:1px}.acq-row>span{position:absolute;right:4px;top:6px;font-size:8.5px;color:#5b625d}.acq-row.failed>span{color:#b34c3c}.acq-error{margin-top:4px;color:#b34c3c;white-space:pre-wrap;word-break:break-word}.acq-empty{padding:7px;text-align:center;color:#5b625d;font-size:9px}
     `;
     document.head.appendChild(s);
   }
