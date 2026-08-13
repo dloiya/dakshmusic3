@@ -102,7 +102,7 @@ async function refreshTopPlayed(env) {
   await ensureTopCache(env);
   const old = await env.DB.prepare(`SELECT track_id, storage_key FROM top_played_cache`).all();
   const oldKeys = new Map((old.results || []).map(r => [Number(r.track_id), r.storage_key]));
-  const { results } = await env.DB.prepare(`SELECT id FROM tracks ORDER BY play_count DESC, id ASC LIMIT 100`).all();
+  const { results } = await env.DB.prepare(`SELECT id FROM tracks ORDER BY play_count DESC, id ASC LIMIT 200`).all();
   await env.DB.prepare(`DELETE FROM top_played_cache`).run();
   for (let i = 0; i < results.length; i++) {
     const cached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(results[i].id).first();

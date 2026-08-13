@@ -1211,7 +1211,7 @@ async function playback(
       `
       UPDATE tracks
       SET
-        play_count = play_count + 1,
+        play_count = 0,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
       `

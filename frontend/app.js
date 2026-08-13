@@ -168,6 +168,8 @@
       items: [
         { label: "Top 100", action: openTop100 },
         { label: "Import Apple Music", action: openAppleImport },
+        { label: "Import Library CSV", action: openLibraryCsvImport },
+        { label: "Export Playlist Excel", action: exportPlaylistExcel },
         { label: "Device Cache", action: openDeviceCache },
         { label: "Clear Playlist", action: async () => {
             if (!confirm("Clear the entire playlist? Cached audio is kept.")) return;
@@ -842,4 +844,74 @@
       openHome();
     } catch (e) { err.textContent = e.message; }
   }
+
+  /* ---------- CSV library seed / Excel export ---------- */
+
+  function parseLibraryCsv(text) {
+    const rows = [];
+    let row = [], cell = "", quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i], n = text[i + 1];
+      if (c === '"') {
+        if (quoted && n === '"') { cell += '"'; i++; }
+        else quoted = !quoted;
+      } else if (c === "," && !quoted) {
+        row.push(cell); cell = "";
+      } else if ((c === "\n" || c === "\r") && !quoted) {
+        if (c === "\r" && n === "\n") i++;
+        row.push(cell); cell = "";
+        if (row.some(v => v.trim() !== "")) rows.push(row);
+        row = [];
+      } else cell += c;
+    }
+    row.push(cell);
+    if (row.some(v => v.trim() !== "")) rows.push(row);
+    if (!rows.length) return [];
+    const headers = rows[0].map(h => h.trim());
+    return rows.slice(1).map(values => Object.fromEntries(headers.map((h, i) => [h, (values[i] || "").trim()])));
+  }
+
+  async function openLibraryCsvImport() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".csv,text/csv";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        toast("Reading library CSV…", 4000);
+        const rows = parseLibraryCsv(await file.text());
+        const items = rows.filter(r => r["Track name"]).map(r => ({
+          title: r["Track name"],
+          artist: r["Artist name"] || "",
+          album: r["Album"] || "",
+          playlist_name: r["Playlist name"] || "Playlist",
+          type: r["Type"] || "Playlist",
+          isrc: r["ISRC"] || "",
+          source_id: r["Apple - id"] || "",
+          apple_id: r["Apple - id"] || "",
+          cache: String(r["100 Cache"] || "").toUpperCase() === "Y",
+          playCount: 0,
+          play_count: 0,
+        }));
+        if (!items.length) throw new Error("No tracks found in CSV");
+        const playlistName = items[0].playlist_name || "Playlist";
+        await appleMusicImport(items);
+        const seeded = await api("/library/seed", {
+          method: "POST",
+          body: JSON.stringify({ playlist_name: playlistName, items }),
+        });
+        toast(`Imported ${seeded.playlist_entries} tracks; ${seeded.cache_entries} cached`, 5000);
+        await openPlaylist();
+      } catch (e) {
+        toast(`Library import failed: ${e.message}`, 6000);
+      }
+    };
+    input.click();
+  }
+
+  function exportPlaylistExcel() {
+    window.location.href = API + "/playlist/export";
+  }
+
 })();
