@@ -31,33 +31,32 @@ jobs:
           p = Path('serverless/entry.js')
           s = p.read_text()
 
-          # Match the current acquisition guard by behavior rather than exact
-          # whitespace, so this patch remains stable when entry.js is formatted.
           pattern = re.compile(
               r'''(?m)^(?P<indent>\s*)if \(!env\.GITHUB_TOKEN \|\| !env\.GITHUB_OWNER \|\| !env\.GITHUB_REPO\) throw new Error\("GitHub Actions dispatch is not configured"\);\n(?P=indent)if \(!track\.duration_ms\) throw new Error\(`Track \$\{track\.natural_key \|\| trackId\} has no canonical duration_ms; refusing acquisition without identity data`\);'''
           )
 
-          replacement = '''\\g<indent>if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
-
-\\g<indent>// Apple imports may lack duration_ms. Resolve the canonical catalog
-\\g<indent>// duration before dispatch so strict identity validation remains intact.
-\\g<indent>if (!track.duration_ms && String(track.source || '').toLowerCase() === 'apple' && track.source_id) {
-\\g<indent>  try {
-\\g<indent>    const lookup = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(track.source_id)}&entity=song`);
-\\g<indent>    if (lookup.ok) {
-\\g<indent>      const data = await lookup.json();
-\\g<indent>      const song = (data.results || []).find(x => x.wrapperType === 'track' && x.trackTimeMillis);
-\\g<indent>      if (song?.trackTimeMillis) {
-\\g<indent>        track.duration_ms = Number(song.trackTimeMillis);
-\\g<indent>        await env.DB.prepare(`UPDATE tracks SET duration_ms=? WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`).bind(track.duration_ms, trackId).run();
-\\g<indent>      }
-\\g<indent>    }
-\\g<indent>  } catch (e) {
-\\g<indent>    console.warn('Apple duration lookup failed', track.source_id, e);
-\\g<indent>  }
-\\g<indent>}
-
-\\g<indent>if (!track.duration_ms) throw new Error(`Track $\\{track.natural_key || trackId\\} has no canonical duration_ms; refusing acquisition without identity data`);'''
+          replacement = (
+              r'\g<indent>if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");\n'
+              r'\n'
+              r'\g<indent>// Apple imports may lack duration_ms. Resolve the canonical catalog duration before dispatch.\n'
+              r'\g<indent>if (!track.duration_ms && String(track.source || "").toLowerCase() === "apple" && track.source_id) {\n'
+              r'\g<indent>  try {\n'
+              r'\g<indent>    const lookup = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(track.source_id)}&entity=song`);\n'
+              r'\g<indent>    if (lookup.ok) {\n'
+              r'\g<indent>      const data = await lookup.json();\n'
+              r'\g<indent>      const song = (data.results || []).find(x => x.wrapperType === "track" && x.trackTimeMillis);\n'
+              r'\g<indent>      if (song?.trackTimeMillis) {\n'
+              r'\g<indent>        track.duration_ms = Number(song.trackTimeMillis);\n'
+              r'\g<indent>        await env.DB.prepare(`UPDATE tracks SET duration_ms=? WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`).bind(track.duration_ms, trackId).run();\n'
+              r'\g<indent>      }\n'
+              r'\g<indent>    }\n'
+              r'\g<indent>  } catch (e) {\n'
+              r'\g<indent>    console.warn("Apple duration lookup failed", track.source_id, e);\n'
+              r'\g<indent>  }\n'
+              r'\g<indent>}\n'
+              r'\n'
+              r'\g<indent>if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);'
+          )
 
           if 'Apple imports may lack duration_ms.' in s:
               print('Apple duration backfill already present')
