@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   album TEXT,
   album_id TEXT,
   duration_ms INTEGER,
+  isrc TEXT,
   artwork_url TEXT,
   natural_key TEXT UNIQUE,
   play_count INTEGER NOT NULL DEFAULT 0,
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_playlist_position ON playlist_entries(position);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON download_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tracks_play_count ON tracks(play_count DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
 CREATE INDEX IF NOT EXISTS idx_album_sessions_access ON album_sessions(last_accessed_at);
 CREATE INDEX IF NOT EXISTS idx_top_played_track ON top_played_cache(track_id);
 CREATE INDEX IF NOT EXISTS idx_albums_source_id ON albums(source_id);
