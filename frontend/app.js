@@ -1,5 +1,11 @@
 (() => {
   const API = "/api/v1";
+  const DEVICE_CACHE_NAME = "device-audio-v1";
+  const DEVICE_CACHE_LIMIT = 10;
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => { /* unsupported or blocked; app still works without it */ });
+  }
 
   /* ---------- low-level API helpers (real endpoints) ---------- */
 
@@ -161,6 +167,7 @@
       items: [
         { label: "Top 100", action: openTop100 },
         { label: "Import Apple Music", action: openAppleImport },
+        { label: "Device Cache", action: openDeviceCache },
         { label: "Clear Playlist", action: async () => {
             if (!confirm("Clear the entire playlist? Cached audio is kept.")) return;
             try { await clearPlaylist(); toast("Playlist cleared"); } catch (e) { toast(e.message); }
@@ -169,6 +176,37 @@
         { label: "Log Out", action: async () => { await logout(); location.reload(); } },
       ],
     });
+  }
+
+  /* ---------- on-device audio cache (Cache Storage API, shared with sw.js) ---------- */
+
+  async function deviceCacheEntries() {
+    if (!("caches" in window)) return [];
+    try {
+      const cache = await caches.open(DEVICE_CACHE_NAME);
+      const keys = await cache.keys();
+      return keys.filter(r => !r.url.includes("__meta__"));
+    } catch { return []; }
+  }
+
+  async function openDeviceCache() {
+    const s = { key: "devicecache", title: "Device Cache", kind: "menu", selected: 0, items: [], emptyText: "" };
+    push(s);
+    if (!("caches" in window)) {
+      s.emptyText = "Your browser doesn't support on-device caching.";
+      renderMenu(s);
+      return;
+    }
+    const entries = await deviceCacheEntries();
+    s.items = [
+      { label: `${entries.length} of ${DEVICE_CACHE_LIMIT} slots used`, sub: "Most recently played tracks are kept offline" },
+      { label: "Clear Device Cache", action: async () => {
+          if (!confirm(`Remove ${entries.length} cached audio file(s) from this device? They'll re-download next time you play them.`)) return;
+          try { await caches.delete(DEVICE_CACHE_NAME); toast("Device cache cleared"); await openDeviceCache(); }
+          catch (e) { toast(e.message); }
+        } },
+    ];
+    renderMenu(s);
   }
 
   /* ---------- playlist (edit-focused) ---------- */
