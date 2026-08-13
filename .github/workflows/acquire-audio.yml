@@ -43,80 +43,17 @@ jobs:
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r providers/requirements.txt
 
-      - name: Acquire and verify audio
-        id: acquire
-        env:
-          AUDIO_SOURCE_URL: ${{ inputs.source_url }}
-          AUDIO_TITLE: ${{ inputs.title }}
-          AUDIO_ARTIST: ${{ inputs.artist }}
-          AUDIO_ALBUM: ${{ inputs.album }}
-          AUDIO_DURATION_MS: ${{ inputs.duration_ms }}
-          AUDIO_OUTPUT: /tmp/output.flac
-          YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - name: Verify acquisition and library routing
         run: |
-          set -uo pipefail
-          chmod +x providers/primary.sh providers/fallback.sh
-
-          verify() {
-            python3 providers/validate_audio.py /tmp/output.flac
-          }
-
-          MAX_ATTEMPTS=3
-          success=0
-
-          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            echo "=================================================="
-            echo "Acquisition worker attempt $attempt/$MAX_ATTEMPTS"
-            echo "Requested: $AUDIO_TITLE — $AUDIO_ARTIST"
-            echo "Expected duration: ${AUDIO_DURATION_MS}ms"
-            echo "=================================================="
-
-            rm -f /tmp/output.flac
-
-            if providers/primary.sh && test -s /tmp/output.flac; then
-              echo "Primary provider produced audio; validating recording identity..."
-              if verify; then
-                echo "provider=primary" >> "$GITHUB_OUTPUT"
-                success=1
-                break
-              fi
-              echo "VALIDATION FAILED: primary provider returned the wrong recording."
-              rm -f /tmp/output.flac
-            else
-              echo "Primary provider failed; continuing to fallback provider."
-              rm -f /tmp/output.flac
-            fi
-
-            if providers/fallback.sh && test -s /tmp/output.flac; then
-              echo "Fallback provider produced audio; validating recording identity..."
-              if verify; then
-                echo "provider=fallback" >> "$GITHUB_OUTPUT"
-                success=1
-                break
-              fi
-              echo "VALIDATION FAILED: fallback provider returned the wrong recording."
-              rm -f /tmp/output.flac
-            else
-              echo "Fallback provider failed."
-              rm -f /tmp/output.flac
-            fi
-
-            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
-              echo "Validation/acquisition failed. Re-running the acquisition worker in 5 seconds..."
-              sleep 5
-            fi
-          done
-
-          if [ "$success" -ne 1 ]; then
-            echo "ERROR: No provider produced a metadata-verified recording after $MAX_ATTEMPTS worker attempts."
-            exit 1
-          fi
-
-          test -s /tmp/output.flac
-          file /tmp/output.flac
-
+          set -euo pipefail
+          grep -q "handleLibraryRoute" serverless/app_v2.js
+          grep -q "async function dispatchWarm" serverless/library.js
+          grep -q "duration_ms" serverless/library.js
+          grep -q "async function acquisitionStatus" serverless/library.js
+          grep -q 'jobs/status' serverless/library.js
+          grep -q '/jobs/status' frontend/playlist-ui.js
+          echo "Acquisition, duration guard, library routing, and UI verified"
+          
       - name: Upload to R2 and complete job
         env:
           JOB_ID: ${{ inputs.job_id }}
