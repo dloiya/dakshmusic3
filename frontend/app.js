@@ -26,6 +26,7 @@
   const clearPlaylist = () => api("/playlist", { method: "DELETE" });
   const getTop100 = () => api("/cache/top");
   const appleMusicImport = (items) => api("/apple-music/import", { method: "POST", body: JSON.stringify({ items }) });
+  const clearAllData = (password) => api("/admin/clear-all", { method: "POST", body: JSON.stringify({ password }) });
   const searchAlbums = (q) => api("/albums/search?q=" + encodeURIComponent(q));
   const getAlbum = (id) => api("/albums/" + encodeURIComponent(id));
   const acquireTrack = (trackId) => api(`/tracks/${encodeURIComponent(trackId)}/acquire`, { method: "POST" });
@@ -164,6 +165,7 @@
             if (!confirm("Clear the entire playlist? Cached audio is kept.")) return;
             try { await clearPlaylist(); toast("Playlist cleared"); } catch (e) { toast(e.message); }
           } },
+        { label: "Clear All Data", action: openClearAllData },
         { label: "Log Out", action: async () => { await logout(); location.reload(); } },
       ],
     });
@@ -362,6 +364,31 @@
       if (!tracks.length) s.emptyText = "No tracks in this album.";
     } catch (e) { s.emptyText = e.message; s.items = []; }
     renderMenu(s);
+  }
+
+  /* ---------- clear all data ---------- */
+
+  function openClearAllData() {
+    push({ key: "clearall", title: "Clear All Data", kind: "field", onGo: runClearAllData });
+    setTimeout(() => document.getElementById("clearAllPassword").focus(), 50);
+  }
+
+  async function runClearAllData() {
+    const pwEl = document.getElementById("clearAllPassword");
+    const status = document.getElementById("clearAllStatus");
+    const password = pwEl.value;
+    if (!password) { status.textContent = "Enter your password to confirm."; return; }
+    status.textContent = "Clearing all data…";
+    try {
+      const res = await clearAllData(password);
+      pwEl.value = "";
+      status.textContent = `Cleared. Removed ${res.r2_objects_deleted} cached audio file(s).`;
+      nowPlayingTrack = null;
+      nowPlayingList = null;
+      audio.pause();
+      audio.removeAttribute("src");
+      toast("All data cleared");
+    } catch (e) { status.textContent = e.message; }
   }
 
   /* ---------- apple music import ---------- */
@@ -639,6 +666,7 @@
   document.getElementById("searchGo").addEventListener("click", runSearch);
   document.getElementById("albumGo").addEventListener("click", runAlbumSearch);
   document.getElementById("appleGo").addEventListener("click", runAppleImport);
+  document.getElementById("clearAllGo").addEventListener("click", runClearAllData);
 
   /* ---------- login ---------- */
 

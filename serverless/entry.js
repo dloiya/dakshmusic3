@@ -22,6 +22,22 @@ async function requireAuth(env, req) {
   return !!row;
 }
 
+function b64(bytes) {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function pbkdf2(password, saltB64) {
+  if (!saltB64) throw new Error("PASSWORD_SALT is not configured");
+  let normalized = saltB64.replaceAll("-", "+").replaceAll("_", "/");
+  normalized += "=".repeat((4 - (normalized.length % 4)) % 4);
+  const raw = Uint8Array.from(atob(normalized), c => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: raw, iterations: 100000, hash: "SHA-256" }, key, 256);
+  return b64(new Uint8Array(bits));
+}
+
 async function ensureTopCache(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS top_played_cache (rank INTEGER PRIMARY KEY, track_id INTEGER NOT NULL UNIQUE, storage_key TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
 }
@@ -350,6 +366,52 @@ async function acquireTrack(env, req, trackId) {
   }
 }
 
+async function clearAllData(env, req) {
+  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+
+  let body;
+  try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
+  const password = String(body?.password || "");
+  if (!password) return json({ error: "Password is required" }, 400);
+  if (!env.PASSWORD_HASH || !env.PASSWORD_SALT) return json({ error: "Authentication is not configured" }, 500);
+
+  let actual;
+  try { actual = await pbkdf2(password, env.PASSWORD_SALT); }
+  catch (e) { console.error("Password verification failed", e); return json({ error: "Password verification failed" }, 500); }
+  if (actual !== env.PASSWORD_HASH) return json({ error: "Invalid password" }, 401);
+
+  // Collect every R2 object key before deleting the rows that reference them,
+  // so cached audio doesn't leak in R2 forever once the DB rows are gone.
+  const keys = new Set();
+  for (const table of ["general_cache", "top_played_cache", "album_cache"]) {
+    const col = table === "top_played_cache" ? "storage_key" : "drive_file_id";
+    try {
+      const { results } = await env.DB.prepare(`SELECT ${col} AS k FROM ${table} WHERE ${col} IS NOT NULL`).all();
+      for (const r of results || []) if (r.k) keys.add(r.k);
+    } catch (e) { console.error("Failed to collect R2 keys from", table, e); }
+  }
+
+  // Delete children before parents. Explicit order rather than relying on
+  // ON DELETE CASCADE, so this is correct regardless of whether D1 has
+  // foreign_keys enforcement turned on.
+  const tables = [
+    "album_cache", "album_sessions", "general_cache", "top_played_cache",
+    "download_jobs", "playlist_entries", "albums", "tracks",
+  ];
+  for (const table of tables) {
+    try { await env.DB.prepare(`DELETE FROM ${table}`).run(); }
+    catch (e) { console.error("Failed to clear table", table, e); }
+  }
+
+  let r2Deleted = 0, r2Failed = 0;
+  for (const key of keys) {
+    try { await env.AUDIO_BUCKET.delete(key); r2Deleted++; }
+    catch (e) { r2Failed++; console.error("Failed to delete R2 object during clear-all", key, e); }
+  }
+
+  return json({ ok: true, cleared: true, r2_objects_deleted: r2Deleted, r2_objects_failed: r2Failed });
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -361,6 +423,8 @@ export default {
     if (path === "/api/v1/apple-music/import" && req.method === "POST") return appleImport(env, req, ctx);
 
     if (path === "/api/v1/albums/search" && req.method === "GET") return albumSearch(env, req);
+
+    if (path === "/api/v1/admin/clear-all" && req.method === "POST") return clearAllData(env, req);
 
     const albumMatch = path.match(/^\/api\/v1\/albums\/([^/]+)$/);
     if (albumMatch && req.method === "GET") return albumDetail(env, req, albumMatch[1]);
