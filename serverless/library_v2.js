@@ -1,3 +1,4 @@
+// Playlist search queue + acquisition source URL fix deployed from main.
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
 function cookie(req) {
@@ -63,8 +64,6 @@ async function seed(env, req, ctx) {
     await env.DB.batch(statements);
   }
 
-  // Older seeds created Apple tracks without source_url. Backfill those rows
-  // from the canonical Apple catalog id so acquisition has a resolvable source.
   const { results: sourceRows = [] } = await env.DB.prepare(`SELECT id,source_id,title FROM tracks WHERE source='apple' AND (source_url IS NULL OR source_url='') AND source_id IS NOT NULL`).all();
   if (sourceRows.length) {
     for (let offset = 0; offset < sourceRows.length; offset += 100) {
