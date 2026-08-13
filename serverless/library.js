@@ -50,11 +50,85 @@ async function findTrack(env, item) {
   return await env.DB.prepare(`SELECT * FROM tracks WHERE LOWER(title)=LOWER(?) AND LOWER(artist)=LOWER(?) AND LOWER(COALESCE(album,''))=LOWER(COALESCE(?,'')) LIMIT 1`).bind(item.title || "", item.artist || "", item.album || "").first();
 }
 
+async function resolveMissingDuration(env, track) {
+  if (track?.duration_ms && Number(track.duration_ms) > 0) return track;
+
+  const source = String(track?.source || "").toLowerCase();
+  let duration = null;
+
+  try {
+    if (source === "apple" && track.source_id) {
+      const catalogId = String(track.source_id).replace(/^apple[-_:]/i, "");
+      if (/^\d+$/.test(catalogId)) {
+        const response = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(catalogId)}&entity=song`);
+        if (response.ok) {
+          const data = await response.json();
+          const song = (data.results || []).find(item => item.wrapperType === "track" && Number(item.trackTimeMillis) > 0);
+          duration = Number(song?.trackTimeMillis) || null;
+        }
+      }
+    }
+
+    if (!duration && source === "deezer" && track.source_id) {
+      const response = await fetch(`https://api.deezer.com/track/${encodeURIComponent(track.source_id)}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (Number(data?.duration) > 0) duration = Number(data.duration) * 1000;
+      }
+    }
+
+    if (!duration && track.source_url) {
+      const match = String(track.source_url).match(/deezer\.com\/(?:[a-z]{2}\/)?track\/(\d+)/i);
+      if (match) {
+        const response = await fetch(`https://api.deezer.com/track/${match[1]}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (Number(data?.duration) > 0) duration = Number(data.duration) * 1000;
+        }
+      }
+    }
+
+    if (!duration && track.title && track.artist) {
+      const query = encodeURIComponent(`track:"${track.title}" artist:"${track.artist}"`);
+      const response = await fetch(`https://api.deezer.com/search?q=${query}&limit=5`);
+      if (response.ok) {
+        const data = await response.json();
+        const wantedTitle = String(track.title).toLowerCase().trim();
+        const wantedArtist = String(track.artist).toLowerCase().trim();
+        const hit = (data.data || []).find(item =>
+          String(item.title || "").toLowerCase().trim() === wantedTitle &&
+          String(item.artist?.name || "").toLowerCase().trim() === wantedArtist &&
+          Number(item.duration) > 0
+        );
+        if (hit) duration = Number(hit.duration) * 1000;
+      }
+    }
+  } catch (error) {
+    console.warn("Duration resolution failed", track?.id, error?.message || error);
+  }
+
+  if (duration) {
+    await env.DB.prepare(`UPDATE tracks SET duration_ms=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`)
+      .bind(duration, track.id).run();
+    track.duration_ms = duration;
+  }
+
+  return track;
+}
+
 async function dispatchWarm(env, trackId) {
   const existing = await env.DB.prepare(`SELECT id, created_at FROM download_jobs WHERE track_id=? AND status IN ('queued','dispatched','running') ORDER BY created_at DESC LIMIT 1`).bind(trackId).first();
   if (existing) return existing.id;
-  const track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(trackId).first();
-  if (!track?.source_url || !track.duration_ms || !env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) return null;
+
+  let track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(trackId).first();
+  if (!track?.source_url || !env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) return null;
+
+  track = await resolveMissingDuration(env, track);
+
+  if (!track.duration_ms) {
+    throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);
+  }
+
   const id = crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,?,'queued')`).bind(id, trackId, "general").run();
   const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/acquire-audio.yml/dispatches`, {
@@ -68,6 +142,28 @@ async function dispatchWarm(env, trackId) {
   }
   await env.DB.prepare(`UPDATE download_jobs SET status='dispatched',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run();
   return id;
+}
+
+async function acquireTrack(env, req, trackId) {
+  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+
+  const id = Number(trackId);
+  if (!Number.isInteger(id) || id <= 0) return json({ error: "Invalid track ID" }, 400);
+
+  const track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(id).first();
+  if (!track) return json({ error: "Track not found" }, 404);
+  if (!track.source_url) return json({ error: "Track has no source URL to acquire from" }, 400);
+
+  const cached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(id).first();
+  if (cached?.drive_file_id) return json({ cached: true, track_id: id, drive_file_id: cached.drive_file_id });
+
+  try {
+    const jobId = await dispatchWarm(env, id);
+    if (!jobId) return json({ error: "Unable to create acquisition job" }, 502);
+    return json({ cached: false, track_id: id, job_id: jobId });
+  } catch (error) {
+    return json({ error: String(error?.message || error) }, 502);
+  }
 }
 
 async function seedLibrary(env, req, ctx) {
@@ -134,6 +230,8 @@ async function exportPlaylist(env, req) {
 export async function handleLibraryRoute(req, env, ctx) {
   const url = new URL(req.url);
   if (!url.pathname.startsWith("/api/v1/")) return null;
+  const acquireMatch = url.pathname.match(/^\/api\/v1\/tracks\/([0-9]+)\/acquire$/);
+  if (acquireMatch && req.method === "POST") return acquireTrack(env, req, acquireMatch[1]);
   if (url.pathname === "/api/v1/library/seed" && req.method === "POST") return seedLibrary(env, req, ctx);
   if (url.pathname === "/api/v1/jobs/status" && req.method === "GET") return acquisitionStatus(env, req);
   if (url.pathname === "/api/v1/playlist/export" && req.method === "GET") return exportPlaylist(env, req);
