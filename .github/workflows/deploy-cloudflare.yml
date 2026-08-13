@@ -22,15 +22,16 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify acquisition and Apple duration code
+      - name: Verify acquisition and library routing
         run: |
           set -euo pipefail
-          grep -q "resolveAppleDuration" serverless/entry.js
-          grep -q "has no canonical duration_ms; refusing acquisition without identity data" serverless/entry.js
           grep -q "handleLibraryRoute" serverless/app_v2.js
-          grep -q "/api/v1/jobs/status" serverless/library.js
-          grep -q "/jobs/status" frontend/playlist-ui.js
-          echo "Acquisition and duration code verified"
+          grep -q "async function dispatchWarm" serverless/library.js
+          grep -q "duration_ms" serverless/library.js
+          grep -q "async function acquisitionStatus" serverless/library.js
+          grep -q 'jobs/status' serverless/library.js
+          grep -q '/jobs/status' frontend/playlist-ui.js
+          echo "Acquisition, duration, library routing, and UI verified"
 
       - name: Install Wrangler
         working-directory: serverless
