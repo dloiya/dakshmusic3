@@ -1,0 +1,32 @@
+name: Code Review Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies
+        run: python -m pip install --user -r providers/requirements.txt
+
+      - name: Run validator unit tests
+        working-directory: providers
+        run: python -m unittest test_validate_audio.py -v
+
+      - name: Check Worker syntax
+        run: node --check serverless/worker.js
+
+      - name: Check entry syntax
+        run: node --check serverless/entry.js
