@@ -1,0 +1,1 @@
+Migration numbering is intentionally reserved after 003_track_natural_key.sql. Remove this file when the next real migration is added.
