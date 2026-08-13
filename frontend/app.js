@@ -245,7 +245,7 @@
     try {
       const rows = await getPlaylist();
       playlistCache = rows;
-      s.items = rows.map((t, i) => ({ html: playlistRowHtml(t, i, rows.length), action: () => playTrack(t, rows) }));
+      s.items = rows.map((t, i) => ({ html: playlistRowHtml(t, i, rows.length), action: () => playTrack(t, rows, "playlist") }));
       renderMenu(s);
       wirePlaylistRowActions(s, rows);
     } catch (e) { s.emptyText = e.message; renderMenu(s); }
@@ -286,7 +286,7 @@
       if (!upNext.length) {
         items.push({ label: rows.length ? "End of queue" : "Playlist is empty", sub: "" });
       } else {
-        upNext.forEach(t => items.push({ label: t.title || "Untitled", sub: t.artist || "", action: () => playTrack(t, rows) }));
+        upNext.forEach(t => items.push({ label: t.title || "Untitled", sub: t.artist || "", action: () => playTrack(t, rows, "playlist") }));
       }
       s.items = items;
       renderMenu(s);
@@ -402,16 +402,35 @@
       const tracks = (al.tracks || []).filter(t => t.id != null);
       const items = [{
         label: "▸ Play Album", sub: `${tracks.length} track(s)`,
-        action: () => { if (tracks.length) playTrack(tracks[0], tracks); },
+        action: () => { if (tracks.length) playTrack(tracks[0], tracks, "album"); },
       }];
       tracks.forEach(t => items.push({
         label: t.title || "Untitled", sub: fmtTime((t.duration_ms || 0) / 1000),
-        action: () => playTrack(t, tracks),
+        action: () => playTrack(t, tracks, "album"),
       }));
       s.items = items;
       if (!tracks.length) s.emptyText = "No tracks in this album.";
+      else warmAlbumOnDevice(tracks);
     } catch (e) { s.emptyText = e.message; s.items = []; }
     renderMenu(s);
+  }
+
+  function warmAlbumOnDevice(tracks) {
+    // All tracks warmed concurrently, not one at a time -- an album is a
+    // bounded, known-size set, unlike an open-ended playlist queue.
+    for (const t of tracks) {
+      if (t.id == null) continue;
+      (async () => {
+        try {
+          const res = await acquireTrack(t.id);
+          if (res.cached) { warmOnDeviceCache(t.id); return; }
+          if (res.job_id) {
+            const ok = await pollJobSilently(res.job_id);
+            if (ok) warmOnDeviceCache(t.id);
+          }
+        } catch { /* best effort */ }
+      })();
+    }
   }
 
   /* ---------- clear all data ---------- */
@@ -528,27 +547,32 @@
     } catch { /* best effort */ }
   }
 
-  function pruneQueueWindow(track, listContext) {
-    if (!listContext) return;
+  function pruneQueueWindow(track, listContext, mode) {
+    if (mode !== "playlist" || !listContext) return;
     const idx = listContext.findIndex(t => t.id === track.id);
     if (idx < QUEUE_WINDOW) return; // items 1-4 (index 0-3): no eviction yet
     // Reaching item 5 (index 4) evicts item 1 (index 0); reaching item 6
     // evicts item 2, and so on -- a trailing window of QUEUE_WINDOW items
     // (current + 3 previous) is always kept, enough for a few steps of
-    // seamless "previous" without unbounded growth.
+    // seamless "previous" without unbounded growth. Albums don't use this
+    // at all -- the whole album is warmed upfront (see warmAlbumOnDevice),
+    // so there's nothing to evict mid-traversal.
     const evictTrack = listContext[idx - QUEUE_WINDOW];
     if (evictTrack?.id != null) evictFromDeviceCache(evictTrack.id);
   }
 
-  function playTrack(track, listContext) {
+  let nowPlayingMode = null; // 'playlist' | 'album' | null
+
+  function playTrack(track, listContext, mode = null) {
     nowPlayingTrack = track;
     nowPlayingList = listContext;
+    nowPlayingMode = mode;
     overrideState = null;
     const id = track.id ?? track.track_id;
     pendingTrackId = id;
     pollGeneration++;
     attemptPlayback(id);
-    pruneQueueWindow(track, listContext);
+    pruneQueueWindow(track, listContext, mode);
     if (current()?.key !== "nowplaying") push(nowPlayingScreen());
     else renderNowPlaying();
   }
@@ -557,7 +581,7 @@
     setNpState("Loading…");
     audio.src = `${API}/playback/${encodeURIComponent(id)}`;
     audio.play().catch(() => {});
-    prefetchNext();
+    if (nowPlayingMode === "playlist") prefetchNext();
   }
 
   function pollJobSilently(jobId, attempt = 0) {
@@ -683,7 +707,7 @@
 
   function skip(delta) {
     const n = neighborTrack(delta);
-    if (n) playTrack(n, nowPlayingList);
+    if (n) playTrack(n, nowPlayingList, nowPlayingMode);
     else if (delta < 0) audio.currentTime = 0;
   }
 

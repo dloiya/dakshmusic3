@@ -395,15 +395,15 @@ async function cacheWholeAlbum(env, albumId, name, artist, trackIds) {
     await env.DB.prepare(`UPDATE album_sessions SET last_accessed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(session.id).run();
   }
 
-  for (const trackId of trackIds) {
+  await Promise.all(trackIds.map(async (trackId) => {
     const existingRow = await env.DB.prepare(`SELECT drive_file_id FROM album_cache WHERE session_id=? AND track_id=?`).bind(session.id, trackId).first();
-    if (existingRow?.drive_file_id) continue;
+    if (existingRow?.drive_file_id) return;
 
     const alreadyCached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(trackId).first();
     if (alreadyCached?.drive_file_id) {
       await env.DB.prepare(`INSERT OR REPLACE INTO album_cache(session_id,track_id,status,drive_file_id,last_accessed_at) VALUES(?,?,'complete',?,CURRENT_TIMESTAMP)`)
         .bind(session.id, trackId, alreadyCached.drive_file_id).run();
-      continue;
+      return;
     }
 
     await env.DB.prepare(`INSERT OR REPLACE INTO album_cache(session_id,track_id,status,last_accessed_at) VALUES(?,?,'queued',CURRENT_TIMESTAMP)`)
@@ -414,7 +414,7 @@ async function cacheWholeAlbum(env, albumId, name, artist, trackIds) {
       console.error("Album cache acquisition dispatch failed", t?.natural_key || trackId, e);
       await env.DB.prepare(`UPDATE album_cache SET status='failed' WHERE session_id=? AND track_id=?`).bind(session.id, trackId).run();
     }
-  }
+  }));
 }
 
 async function albumDetail(env, req, albumId, ctx) {
