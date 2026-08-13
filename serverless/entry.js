@@ -204,14 +204,33 @@ async function appleImport(env, req, ctx) {
 async function addPlaylistEntry(env, body) {
   if (!body?.title) return json({ error: "Track title is required" }, 400);
   let track = body.source_id ? await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(body.source_id).first() : null;
+  if (body.album_id) {
+    try {
+      await upsertLightAlbum(env, {
+        source_id: body.album_id,
+        title: body.album || null,
+        artist: body.artist || null,
+        artwork_url: body.artwork_url || null,
+      });
+    } catch (e) { console.error("Album upsert failed (playlist add)", body.album_id, e); }
+  }
   if (!track) {
     const created = await env.DB.prepare(`INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url) VALUES(?,?,?,?,?,?,?,?,?)`)
       .bind(body.source || "deezer", body.source_id || null, body.source_url || null, body.title, body.artist || "", body.album || null, body.album_id || null, body.duration_ms || null, body.artwork_url || null).run();
     track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(created.meta.last_row_id).first();
   }
+
+  const existingEntry = await env.DB.prepare(`SELECT id, position FROM playlist_entries WHERE track_id=?`).bind(track.id).first();
+  if (existingEntry) {
+    return json({ track_id: track.id, position: existingEntry.position, entry_id: existingEntry.id, already_present: true });
+  }
+
   const pos = await env.DB.prepare(`SELECT COALESCE(MAX(position),0)+1 AS p FROM playlist_entries`).first();
-  await env.DB.prepare(`INSERT INTO playlist_entries(track_id,position) VALUES(?,?)`).bind(track.id, pos?.p || 1).run();
-  return json({ track_id: track.id, position: pos?.p || 1 }, 201);
+  const inserted = await env.DB.prepare(`
+    INSERT INTO playlist_entries(track_id,position,title,artist,album,artwork_url,duration_ms)
+    VALUES(?,?,?,?,?,?,?)
+  `).bind(track.id, pos?.p || 1, track.title, track.artist, track.album, track.artwork_url, track.duration_ms).run();
+  return json({ track_id: track.id, position: pos?.p || 1, entry_id: inserted.meta.last_row_id, already_present: false }, 201);
 }
 
 async function playlistMutation(env, req, entryId) {

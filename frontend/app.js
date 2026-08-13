@@ -294,7 +294,10 @@
       const s = { key: "searchresults", title: "Results", kind: "menu", selected: 0, items: [], emptyText: "No results." };
       s.items = (d.items || []).map(it => ({
         label: it.title || "Untitled", sub: it.artist || "",
-        action: async () => { try { await addToPlaylist(it); toast("Added to Playlist"); } catch (e) { toast(e.message); } },
+        action: async () => {
+          try { const r = await addToPlaylist(it); toast(r.already_present ? "Already in Playlist" : "Added to Playlist"); }
+          catch (e) { toast(e.message); }
+        },
       }));
       push(s);
     } catch (e) { status.textContent = e.message; }
