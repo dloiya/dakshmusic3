@@ -492,6 +492,28 @@
     refreshQueueHeaderIfVisible();
   }
 
+  const QUEUE_WINDOW = 4;
+
+  async function evictFromDeviceCache(trackId) {
+    if (!("caches" in window) || trackId == null) return;
+    try {
+      const cache = await caches.open(DEVICE_CACHE_NAME);
+      await cache.delete(`${location.origin}/api/v1/playback/${trackId}`);
+    } catch { /* best effort */ }
+  }
+
+  function pruneQueueWindow(track, listContext) {
+    if (!listContext) return;
+    const idx = listContext.findIndex(t => t.id === track.id);
+    if (idx < QUEUE_WINDOW) return; // items 1-4 (index 0-3): no eviction yet
+    // Reaching item 5 (index 4) evicts item 1 (index 0); reaching item 6
+    // evicts item 2, and so on -- a trailing window of QUEUE_WINDOW items
+    // (current + 3 previous) is always kept, enough for a few steps of
+    // seamless "previous" without unbounded growth.
+    const evictTrack = listContext[idx - QUEUE_WINDOW];
+    if (evictTrack?.id != null) evictFromDeviceCache(evictTrack.id);
+  }
+
   function playTrack(track, listContext) {
     nowPlayingTrack = track;
     nowPlayingList = listContext;
@@ -500,6 +522,7 @@
     pendingTrackId = id;
     pollGeneration++;
     attemptPlayback(id);
+    pruneQueueWindow(track, listContext);
     if (current()?.key !== "nowplaying") push(nowPlayingScreen());
     else renderNowPlaying();
   }
