@@ -9,6 +9,23 @@ const json = (data, status = 200, extra = {}) =>
 
 const now = () => Math.floor(Date.now() / 1000);
 
+function parseRange(rangeHeader, size) {
+  if (!rangeHeader) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!m || (!m[1] && !m[2])) return null;
+  let start = m[1] ? parseInt(m[1], 10) : null;
+  let end = m[2] ? parseInt(m[2], 10) : null;
+  if (start === null) {
+    // Suffix range: last `end` bytes.
+    start = Math.max(0, size - end);
+    end = size - 1;
+  } else if (end === null || end >= size) {
+    end = size - 1;
+  }
+  if (start > end || start < 0 || start >= size) return null;
+  return { start, end };
+}
+
 function slug(s) {
   return (
     String(s || "")
@@ -1116,14 +1133,58 @@ async function playback(
     );
   }
 
-  const object =
-    await env.AUDIO_BUCKET.get(
+  const head =
+    await env.AUDIO_BUCKET.head(
       row.storage_key
     );
 
-  if (!object) {
+  if (!head) {
     console.error(
       "R2 object not found:",
+      row.storage_key
+    );
+
+    return json(
+      {
+        error:
+          "Storage object not found",
+      },
+      502
+    );
+  }
+
+  const totalSize = head.size;
+
+  const rangeHeader =
+    req?.headers?.get("Range") ||
+    req?.headers?.get("range") ||
+    null;
+
+  const range = parseRange(
+    rangeHeader,
+    totalSize
+  );
+
+  const object = range
+    ? await env.AUDIO_BUCKET.get(
+        row.storage_key,
+        {
+          range: {
+            offset: range.start,
+            length:
+              range.end -
+              range.start +
+              1,
+          },
+        }
+      )
+    : await env.AUDIO_BUCKET.get(
+        row.storage_key
+      );
+
+  if (!object) {
+    console.error(
+      "R2 object not found on get:",
       row.storage_key
     );
 
@@ -1141,7 +1202,10 @@ async function playback(
       "X-Cache-Warm"
     ) === "1";
 
-  if (!isCacheWarm) {
+  const isPlayStart =
+    !range || range.start === 0;
+
+  if (!isCacheWarm && isPlayStart) {
     await env.DB.prepare(
       `
       UPDATE tracks
@@ -1166,27 +1230,62 @@ async function playback(
       .run();
   }
 
+  const contentType =
+    object.httpMetadata
+      ?.contentType ||
+    (
+      row.format === "mp3"
+        ? "audio/mpeg"
+        : "audio/flac"
+    );
+
+  const disposition =
+    `inline; filename="${encodeURIComponent(
+      row.title || "track"
+    )}.${row.format || "flac"}"`;
+
+  if (range) {
+    return new Response(
+      object.body,
+      {
+        status: 206,
+        headers: {
+          "content-type":
+            contentType,
+          "content-length":
+            String(
+              range.end -
+                range.start +
+                1
+            ),
+          "content-range":
+            `bytes ${range.start}-${range.end}/${totalSize}`,
+          "accept-ranges":
+            "bytes",
+          "cache-control":
+            "private, max-age=60",
+          "content-disposition":
+            disposition,
+        },
+      }
+    );
+  }
+
   return new Response(
     object.body,
     {
       status: 200,
       headers: {
         "content-type":
-          object.httpMetadata
-            ?.contentType ||
-          (
-            row.format === "mp3"
-              ? "audio/mpeg"
-              : "audio/flac"
-          ),
+          contentType,
         "content-length":
-          String(object.size),
+          String(totalSize),
+        "accept-ranges":
+          "bytes",
         "cache-control":
           "private, max-age=60",
         "content-disposition":
-          `inline; filename="${encodeURIComponent(
-            row.title || "track"
-          )}.${row.format || "flac"}"`,
+          disposition,
       },
     }
   );
