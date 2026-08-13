@@ -47,7 +47,6 @@ async function seed(env, req, ctx) {
   const items = Array.isArray(body?.items) ? body.items.filter(x => x?.title) : [];
   if (!items.length) return json({ error: "No tracks supplied" }, 400);
 
-  // Reset counts now; playback accounting is intentionally disabled for this library.
   await env.DB.prepare(`UPDATE tracks SET play_count=0`).run();
   await env.DB.prepare(`DELETE FROM playlist_entries`).run();
   await env.DB.prepare(`DELETE FROM top_played_cache`).run();
@@ -63,7 +62,6 @@ async function seed(env, req, ctx) {
     await env.DB.batch(statements);
   }
 
-  // Resolve all imported Apple IDs in bounded D1 batches, then build the playlist in CSV order.
   const playlistRows = [];
   for (let offset = 0; offset < items.length; offset += 100) {
     const chunk = items.slice(offset, offset + 100).filter(x => x.source_id);
@@ -78,7 +76,6 @@ async function seed(env, req, ctx) {
     }
   }
 
-  // Rows without Apple IDs are resolved by the stable natural key in small batches.
   for (let offset = 0; offset < items.length; offset += 100) {
     const chunk = items.slice(offset, offset + 100).filter(x => !x.source_id);
     for (const x of chunk) {
@@ -87,7 +84,6 @@ async function seed(env, req, ctx) {
     }
   }
 
-  // Reconstruct exact CSV order using the track identity rather than query order.
   const byKey = new Map(playlistRows.map(t => [t.source_id || `title:${t.title}|artist:${t.artist}|album:${t.album || ""}`, t]));
   const ordered = [];
   for (let i = 0; i < items.length; i++) {
@@ -102,8 +98,7 @@ async function seed(env, req, ctx) {
     await env.DB.batch(chunk.map((t, i) => env.DB.prepare(`INSERT INTO playlist_entries(track_id,position,title,artist,album,artwork_url,duration_ms) VALUES(?,?,?,?,?,?,?)`).bind(t.id, offset + i + 1, t.title, t.artist, t.album, t.artwork_url, t.duration_ms)));
   }
 
-  // TOP 100 is strictly the first 100 CSV rows whose "100 Cache" value is Y.
-  const topItems = items.filter(x => String(x["100 Cache"] ?? x.cache ?? "").trim().toUpperCase() === "Y").slice(0, 100);
+  const topItems = items.filter(x => String(x["100 Cache"] ?? x.cache ?? "").trim().toUpperCase() === "Y").slice(0, 200);
   const topTracks = [];
   for (const x of topItems) {
     const t = x.source_id
@@ -115,7 +110,6 @@ async function seed(env, req, ctx) {
     await env.DB.batch(topTracks.map((t, i) => env.DB.prepare(`INSERT INTO top_played_cache(rank,track_id,storage_key,updated_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)`).bind(i + 1, t.id)));
   }
 
-  // Warm acquisition is deliberately moved to the scheduled worker. This keeps seed below the Worker subrequest limit.
   return json({ ok: true, playlist_entries: ordered.length, cache_entries: topTracks.length, cache_limit: 200, top100: topTracks.map((t, i) => ({ rank: i + 1, track_id: t.id, title: t.title, artist: t.artist, play_count: 0 })), missing_count: items.length - ordered.length, play_counts_reset: true });
 }
 
@@ -126,10 +120,20 @@ async function warmTopCache(env) {
   }
 }
 
+async function acquisitionStatus(env, req) {
+  if (!(await auth(env, req))) return json({ error: "Authentication required" }, 401);
+  const { results = [] } = await env.DB.prepare(`SELECT j.id,j.status,j.error,j.updated_at,j.track_id,t.title,t.artist,t.album FROM download_jobs j JOIN tracks t ON t.id=j.track_id WHERE j.status IN ('queued','dispatched','running','failed') ORDER BY j.updated_at DESC LIMIT 50`).all();
+  return json({
+    active: results.filter(x => x.status !== 'failed').map(x => ({ id:x.id,status:x.status,title:x.title,artist:x.artist,album:x.album,updated_at:x.updated_at })),
+    errors: results.filter(x => x.status === 'failed').map(x => ({ id:x.id,title:x.title,artist:x.artist,album:x.album,error:x.error || 'Acquisition failed',updated_at:x.updated_at })),
+  });
+}
+
 export async function scheduled(env) { await warmTopCache(env); }
 
 export async function handleLibraryV2(req, env, ctx) {
   const url = new URL(req.url);
   if (url.pathname === "/api/v1/library/seed" && req.method === "POST") return seed(env, req, ctx);
+  if (url.pathname === "/api/v1/jobs/status" && req.method === "GET") return acquisitionStatus(env, req);
   return null;
 }
