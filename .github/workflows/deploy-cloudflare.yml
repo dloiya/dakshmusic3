@@ -23,7 +23,9 @@ jobs:
           node-version: 22
 
       - name: Patch acquisition identity resolver
-        run: python3 .github/scripts/patch_acquisition_identity.py
+        run: |
+          python3 -c 'from pathlib import Path; p=Path(".github/scripts/patch_acquisition_identity.py"); s=p.read_text(); s=s.replace("s2, count = pattern.subn(replacement + \\\"\\n\\n\\\", s, count=1)", "s2, count = pattern.subn(lambda _match: replacement + \\\"\\n\\n\\\", s, count=1)"); p.write_text(s)'
+          python3 .github/scripts/patch_acquisition_identity.py
 
       - name: Verify Apple duration resolution is present
         run: |
