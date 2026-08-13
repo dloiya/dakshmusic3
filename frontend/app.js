@@ -335,30 +335,14 @@
     try {
       const al = await getAlbum(albumId);
       s.title = al.title || "Album";
-      const tracks = al.tracks || [];
+      const tracks = (al.tracks || []).filter(t => t.id != null);
       const items = [{
         label: "▸ Play Album", sub: `${tracks.length} track(s)`,
-        action: async () => {
-          if (!tracks.length) return;
-          toast("Adding album to Playlist…");
-          for (const t of tracks) { try { await addToPlaylist(t); } catch { /* keep going */ } }
-          const rows = await getPlaylist();
-          playlistCache = rows;
-          const first = rows.find(r => r.source_id === tracks[0].source_id);
-          if (first) playTrack(first, rows);
-        },
+        action: () => { if (tracks.length) playTrack(tracks[0], tracks); },
       }];
       tracks.forEach(t => items.push({
         label: t.title || "Untitled", sub: fmtTime((t.duration_ms || 0) / 1000),
-        action: async () => {
-          try {
-            await addToPlaylist(t);
-            const rows = await getPlaylist();
-            playlistCache = rows;
-            const added = rows.find(r => r.source_id === t.source_id);
-            if (added) playTrack(added, rows);
-          } catch (e) { toast(e.message); }
-        },
+        action: () => playTrack(t, tracks),
       }));
       s.items = items;
       if (!tracks.length) s.emptyText = "No tracks in this album.";

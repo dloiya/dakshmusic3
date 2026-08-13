@@ -365,23 +365,40 @@ async function albumDetail(env, req, albumId) {
   if (data.error) return json({ error: data.error.message || "Album not found" }, 404);
   const artwork = data.cover_xl || data.cover_big || data.cover_medium || null;
   try { await upsertRichAlbum(env, data); } catch (e) { console.error("Rich album upsert failed", albumId, e); }
+
+  const rawTracks = (data.tracks?.data || []).map(x => ({
+    source: "deezer",
+    source_id: String(x.id),
+    source_url: x.link,
+    title: x.title,
+    artist: x.artist?.name || data.artist?.name || null,
+    album: data.title,
+    album_id: String(data.id),
+    duration_ms: (x.duration || 0) * 1000,
+    artwork_url: artwork,
+  }));
+
+  // Resolve each track to a real DB row (so it's directly playable) without
+  // touching playlist_entries -- playing an album is intentionally decoupled
+  // from the user's actual playlist.
+  const tracks = [];
+  for (const rt of rawTracks) {
+    try {
+      const track = await findOrPrepareTrack(env, rt);
+      tracks.push({ ...rt, id: track.id });
+    } catch (e) {
+      console.error("Failed to resolve album track", rt.source_id, e);
+      tracks.push({ ...rt, id: null });
+    }
+  }
+
   return json({
     album_id: String(data.id),
     title: data.title,
     artist: data.artist?.name || null,
     artwork_url: artwork,
     release_date: data.release_date || null,
-    tracks: (data.tracks?.data || []).map(x => ({
-      source: "deezer",
-      source_id: String(x.id),
-      source_url: x.link,
-      title: x.title,
-      artist: x.artist?.name || data.artist?.name || null,
-      album: data.title,
-      album_id: String(data.id),
-      duration_ms: (x.duration || 0) * 1000,
-      artwork_url: artwork,
-    })),
+    tracks,
   });
 }
 
