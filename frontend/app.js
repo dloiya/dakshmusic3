@@ -630,55 +630,61 @@
   btnPlay.addEventListener("click", onPlayBtn);
   btnCenter.addEventListener("click", selectCurrent);
 
-  let dragging = false, lastY = 0, accumPx = 0, lastTickTime = 0;
-  const TICK_PX = 14;
+  // Wheel divided into 8 equal 45-degree sections (a-h) around its center.
+  // Moving from one section into an adjacent one within SECTION_TIMEOUT_MS
+  // counts as a single scroll tick in that direction. The gesture can
+  // start in any section -- only the transition between sections matters,
+  // not an absolute starting point.
+  const SECTION_COUNT = 8;
+  const SECTION_TIMEOUT_MS = 500;
+  let dragging = false, lastSection = null, lastSectionTime = 0;
 
-  function yFromEvent(e) {
+  function sectionFromEvent(e) {
+    const r = wheel.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     const p = e.touches ? e.touches[0] : e;
-    return p.clientY;
-  }
-
-  // How many rows one tick should move, scaled by how fast the wheel is
-  // being dragged -- mirrors a real click wheel's acceleration: slow
-  // drags move one row at a time, fast drags fly through many.
-  function stepForSpeed(now) {
-    const msSinceLastTick = now - lastTickTime;
-    lastTickTime = now;
-    if (msSinceLastTick < 40) return 5;
-    if (msSinceLastTick < 80) return 3;
-    if (msSinceLastTick < 150) return 2;
-    return 1;
+    let deg = Math.atan2(p.clientY - cy, p.clientX - cx) * (180 / Math.PI);
+    deg = (deg + 360) % 360;
+    return Math.floor(deg / (360 / SECTION_COUNT)) % SECTION_COUNT;
   }
 
   function wheelStart(e) {
     if (e.target.closest(".zone") || e.target.closest(".center-btn")) return;
-    dragging = true; accumPx = 0; lastTickTime = 0;
-    lastY = yFromEvent(e);
+    dragging = true;
+    lastSection = sectionFromEvent(e);
+    lastSectionTime = performance.now();
   }
   function wheelMove(e) {
     if (!dragging) return;
-    const y = yFromEvent(e);
-    // Finger moving up (y decreasing) scrolls forward/down through the
-    // list, matching normal mobile swipe-to-scroll conventions.
-    const diff = lastY - y;
-    lastY = y;
-    accumPx += diff;
+    const section = sectionFromEvent(e);
     const now = performance.now();
-    while (accumPx >= TICK_PX) {
-      accumPx -= TICK_PX;
-      const step = stepForSpeed(now);
-      if (current()?.kind === "nowplaying") { audio.volume = Math.min(1, audio.volume + 0.05); showVolume(); }
-      else moveSelection(step);
-    }
-    while (accumPx <= -TICK_PX) {
-      accumPx += TICK_PX;
-      const step = stepForSpeed(now);
-      if (current()?.kind === "nowplaying") { audio.volume = Math.max(0, audio.volume - 0.05); showVolume(); }
-      else moveSelection(-step);
+
+    if (section !== lastSection) {
+      const elapsed = now - lastSectionTime;
+
+      if (elapsed <= SECTION_TIMEOUT_MS) {
+        // Shortest signed distance around the 8 sections (clockwise positive).
+        let delta = section - lastSection;
+        if (delta > SECTION_COUNT / 2) delta -= SECTION_COUNT;
+        if (delta < -SECTION_COUNT / 2) delta += SECTION_COUNT;
+
+        if (delta !== 0) {
+          if (current()?.kind === "nowplaying") {
+            if (delta > 0) { audio.volume = Math.min(1, audio.volume + 0.05 * Math.abs(delta)); }
+            else { audio.volume = Math.max(0, audio.volume - 0.05 * Math.abs(delta)); }
+            showVolume();
+          } else {
+            moveSelection(delta);
+          }
+        }
+      }
+
+      lastSection = section;
+      lastSectionTime = now;
     }
     e.preventDefault();
   }
-  function wheelEnd() { dragging = false; }
+  function wheelEnd() { dragging = false; lastSection = null; }
 
   wheel.addEventListener("mousedown", wheelStart);
   window.addEventListener("mousemove", wheelMove);
