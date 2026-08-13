@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS general_cache (
   last_accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS top_played_cache (
+  rank INTEGER PRIMARY KEY,
+  track_id INTEGER NOT NULL UNIQUE REFERENCES tracks(id) ON DELETE CASCADE,
+  storage_key TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS download_jobs (
   id TEXT PRIMARY KEY,
   track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -70,3 +77,4 @@ CREATE INDEX IF NOT EXISTS idx_playlist_position ON playlist_entries(position);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON download_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tracks_play_count ON tracks(play_count DESC);
 CREATE INDEX IF NOT EXISTS idx_album_sessions_access ON album_sessions(last_accessed_at);
+CREATE INDEX IF NOT EXISTS idx_top_played_track ON top_played_cache(track_id);
