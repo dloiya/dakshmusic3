@@ -40,7 +40,7 @@ jobs:
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r providers/requirements.txt
 
-      - name: Acquire audio
+      - name: Acquire and verify audio
         id: acquire
         env:
           AUDIO_SOURCE_URL: ${{ inputs.source_url }}
@@ -54,14 +54,29 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x providers/primary.sh providers/fallback.sh
-          if providers/primary.sh; then
-            echo "provider=primary" >> "$GITHUB_OUTPUT"
+
+          verify() {
+            python3 providers/validate_audio.py /tmp/output.flac
+          }
+
+          rm -f /tmp/output.flac
+          if providers/primary.sh && test -s /tmp/output.flac; then
+            echo "Primary provider produced audio; validating metadata..."
+            if verify; then
+              echo "provider=primary" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Primary provider returned the wrong recording; rejecting it and trying fallback."
           else
-            rm -f /tmp/output.flac
-            providers/fallback.sh
-            echo "provider=fallback" >> "$GITHUB_OUTPUT"
+            echo "Primary provider failed; trying fallback."
           fi
+
+          rm -f /tmp/output.flac
+          providers/fallback.sh
           test -s /tmp/output.flac
+          echo "Fallback provider produced audio; validating metadata..."
+          verify
+          echo "provider=fallback" >> "$GITHUB_OUTPUT"
           file /tmp/output.flac
 
       - name: Upload to R2 and complete job
