@@ -6,6 +6,8 @@ import sys
 import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 def normalize(value: str) -> str:
@@ -46,12 +48,55 @@ def read_metadata(path: Path) -> dict:
     }
 
 
+def normalize_isrc(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def expected_isrc_from_source_url(source_url: str) -> str:
+    """Resolve the canonical ISRC from a Deezer track URL when possible.
+
+    The Worker currently sends the Deezer source URL to GitHub. Deezer's
+    public track endpoint exposes the track ISRC, so the validator can obtain
+    the canonical recording identifier without trusting downloaded metadata.
+    """
+    if not source_url:
+        return ""
+
+    parsed = urlparse(source_url)
+    if parsed.hostname not in {"deezer.com", "www.deezer.com", "api.deezer.com"}:
+        return ""
+
+    match = re.search(r"/track/(\d+)", parsed.path)
+    if not match:
+        return ""
+
+    track_id = match.group(1)
+    req = Request(
+        f"https://api.deezer.com/track/{track_id}",
+        headers={"User-Agent": "dakshmusic3-audio-validator/1.0"},
+    )
+    try:
+        with urlopen(req, timeout=15) as response:
+            data = json.load(response)
+        return normalize_isrc(data.get("isrc", ""))
+    except Exception as exc:
+        print(f"WARNING: Could not resolve canonical ISRC from Deezer: {exc}", file=sys.stderr)
+        return ""
+
+
 def main(path_text: str) -> None:
     path = Path(path_text).resolve()
     expected_title = os.environ.get("AUDIO_TITLE", "").strip()
     expected_artist = os.environ.get("AUDIO_ARTIST", "").strip()
     expected_album = os.environ.get("AUDIO_ALBUM", "").strip()
     expected_duration_ms_raw = os.environ.get("AUDIO_DURATION_MS", "").strip()
+    expected_isrc = normalize_isrc(os.environ.get("AUDIO_ISRC", ""))
+    source_url = os.environ.get("AUDIO_SOURCE_URL", "").strip()
+
+    # Prefer an explicitly supplied ISRC. Otherwise derive the canonical ISRC
+    # from the Deezer source track that the Worker requested.
+    if not expected_isrc:
+        expected_isrc = expected_isrc_from_source_url(source_url)
 
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError("Validation failed: output audio file is missing or empty")
@@ -72,6 +117,7 @@ def main(path_text: str) -> None:
     actual_artist = actual.get("artist", "")
     actual_album = actual.get("album", "")
     actual_duration_s = actual.get("duration_s")
+    actual_isrc = normalize_isrc(actual.get("isrc", ""))
 
     title_score = similarity(expected_title, actual_title)
     artist_score = similarity(expected_artist, actual_artist)
@@ -81,27 +127,25 @@ def main(path_text: str) -> None:
         if actual_duration_s is not None
         else None
     )
-
-    # Duration is a recording-level signal that survives changes in filenames,
-    # provider title formatting, and missing/rewritten container tags. Allow a
-    # small tolerance for encoder/container rounding and provider trimming.
     duration_tolerance_s = max(2.0, expected_duration_s * 0.005)
-    duration_ok = (
-        actual_duration_s is not None
-        and duration_delta_s <= duration_tolerance_s
-    )
+    duration_ok = actual_duration_s is not None and duration_delta_s <= duration_tolerance_s
 
-    # Artist is another stable signal. Do not use title as an identity gate:
-    # providers commonly return titles such as "Artist - Song" or omit remix
-    # annotations even when the underlying recording is correct.
+    # Artist remains a stable fallback identity signal when the provider does
+    # not preserve an ISRC tag.
     artist_ok = bool(actual_artist) and artist_score >= 0.90
 
-    # Album is diagnostic/supporting only. Different providers may identify a
-    # single, deluxe edition, remaster, or compilation differently.
     album_score = similarity(expected_album, actual_album) if expected_album and actual_album else None
     album_ok = True if not expected_album or not actual_album else album_score >= 0.70
 
-    valid = bool(artist_ok and duration_ok and album_ok)
+    # ISRC is the strongest check. If the canonical ISRC is known and the
+    # downloaded file also exposes one, a mismatch is an immediate rejection.
+    # If the file has no ISRC tag, fall back to artist + duration because many
+    # otherwise-valid FLACs do not preserve the ISRC container tag.
+    isrc_available = bool(expected_isrc)
+    isrc_checked = bool(expected_isrc and actual_isrc)
+    isrc_ok = True if not isrc_checked else expected_isrc == actual_isrc
+
+    valid = bool(artist_ok and duration_ok and album_ok and isrc_ok)
 
     report = {
         "expected": {
@@ -109,6 +153,8 @@ def main(path_text: str) -> None:
             "artist": expected_artist,
             "album": expected_album,
             "duration_s": round(expected_duration_s, 3),
+            "isrc": expected_isrc or None,
+            "source_url": source_url or None,
         },
         "actual": {
             "title": actual_title,
@@ -116,7 +162,7 @@ def main(path_text: str) -> None:
             "album": actual_album,
             "album_artist": actual.get("album_artist", ""),
             "track": actual.get("track", ""),
-            "isrc": actual.get("isrc", ""),
+            "isrc": actual_isrc or None,
             "duration_s": None if actual_duration_s is None else round(actual_duration_s, 3),
         },
         "scores": {
@@ -127,6 +173,9 @@ def main(path_text: str) -> None:
             "duration_tolerance_s": round(duration_tolerance_s, 3),
         },
         "checks": {
+            "isrc_available": isrc_available,
+            "isrc_checked": isrc_checked,
+            "isrc": isrc_ok,
             "artist": artist_ok,
             "duration": duration_ok,
             "album": album_ok,
@@ -135,6 +184,12 @@ def main(path_text: str) -> None:
         "valid": valid,
     }
     print(json.dumps(report, indent=2))
+
+    if not isrc_ok:
+        raise RuntimeError(
+            f"Audio identity validation failed: ISRC mismatch. "
+            f"Expected={expected_isrc!r}, downloaded={actual_isrc!r}"
+        )
 
     if not artist_ok:
         raise RuntimeError(
@@ -155,7 +210,10 @@ def main(path_text: str) -> None:
             f"Requested={expected_album!r}, downloaded={actual_album!r}, score={album_score:.3f}"
         )
 
-    print("Audio identity validation PASSED (artist + duration)")
+    if isrc_checked:
+        print("Audio identity validation PASSED (ISRC + artist + duration)")
+    else:
+        print("Audio identity validation PASSED (artist + duration; downloaded file had no ISRC tag)")
 
 
 if __name__ == "__main__":
