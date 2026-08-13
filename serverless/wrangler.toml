@@ -17,6 +17,7 @@ GITHUB_REPO = "dakshmusic3"
 binding = "DB"
 database_name = "dakshmusic3"
 database_id = "abf08c50-9533-4e91-8fe9-8c0b72f28136"
+migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "AUDIO_BUCKET"
