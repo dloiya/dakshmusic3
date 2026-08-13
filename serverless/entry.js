@@ -199,6 +199,7 @@ async function uploadAudio(env, req, jobId) {
       }
     }
   }
+  await env.DB.prepare(`UPDATE album_cache SET status='complete',drive_file_id=?,last_accessed_at=CURRENT_TIMESTAMP WHERE track_id=?`).bind(storageKey, job.track_id).run();
   return json({ ok: true, storage_key: storageKey });
 }
 
@@ -343,7 +344,60 @@ async function albumSearch(env, req) {
   return json({ items });
 }
 
-async function albumDetail(env, req, albumId) {
+async function cacheWholeAlbum(env, albumId, name, artist, trackIds) {
+  const limit = Math.max(1, Number.parseInt(env.MAX_ALBUM_SESSIONS || "5", 10) || 5);
+
+  let session = await env.DB.prepare(`SELECT id FROM album_sessions WHERE source_album_id=?`).bind(albumId).first();
+  if (!session) {
+    const sessionId = crypto.randomUUID();
+    await env.DB.prepare(`INSERT INTO album_sessions(id,source_album_id,name,artist) VALUES(?,?,?,?)`)
+      .bind(sessionId, albumId, name || "Unknown Album", artist || null).run();
+    session = { id: sessionId };
+
+    // FIFO: strictly oldest-inserted evicted first, regardless of how
+    // recently an album was re-opened (unlike general_cache's LRU).
+    const old = await env.DB.prepare(`SELECT id FROM album_sessions ORDER BY created_at ASC LIMIT -1 OFFSET ?`).bind(limit).all();
+    for (const row of old.results || []) {
+      const tracks = await env.DB.prepare(`SELECT drive_file_id FROM album_cache WHERE session_id=?`).bind(row.id).all();
+      for (const t of tracks.results || []) {
+        if (!t.drive_file_id) continue;
+        const protectedRow = await env.DB.prepare(`
+          SELECT 1 FROM general_cache WHERE drive_file_id=?
+          UNION SELECT 1 FROM top_played_cache WHERE storage_key=?
+        `).bind(t.drive_file_id, t.drive_file_id).first();
+        if (!protectedRow) {
+          try { await env.AUDIO_BUCKET.delete(t.drive_file_id); } catch (e) { console.error("Album cache R2 eviction failed", t.drive_file_id, e); }
+        }
+      }
+      await env.DB.prepare(`DELETE FROM album_sessions WHERE id=?`).bind(row.id).run();
+    }
+  } else {
+    await env.DB.prepare(`UPDATE album_sessions SET last_accessed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(session.id).run();
+  }
+
+  for (const trackId of trackIds) {
+    const existingRow = await env.DB.prepare(`SELECT drive_file_id FROM album_cache WHERE session_id=? AND track_id=?`).bind(session.id, trackId).first();
+    if (existingRow?.drive_file_id) continue;
+
+    const alreadyCached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(trackId).first();
+    if (alreadyCached?.drive_file_id) {
+      await env.DB.prepare(`INSERT OR REPLACE INTO album_cache(session_id,track_id,status,drive_file_id,last_accessed_at) VALUES(?,?,'complete',?,CURRENT_TIMESTAMP)`)
+        .bind(session.id, trackId, alreadyCached.drive_file_id).run();
+      continue;
+    }
+
+    await env.DB.prepare(`INSERT OR REPLACE INTO album_cache(session_id,track_id,status,last_accessed_at) VALUES(?,?,'queued',CURRENT_TIMESTAMP)`)
+      .bind(session.id, trackId).run();
+    try { await dispatchWarm(env, trackId); }
+    catch (e) {
+      const t = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(trackId).first();
+      console.error("Album cache acquisition dispatch failed", t?.natural_key || trackId, e);
+      await env.DB.prepare(`UPDATE album_cache SET status='failed' WHERE session_id=? AND track_id=?`).bind(session.id, trackId).run();
+    }
+  }
+}
+
+async function albumDetail(env, req, albumId, ctx) {
   if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
   const response = await fetch(`https://api.deezer.com/album/${encodeURIComponent(albumId)}`);
   if (!response.ok) return json({ error: `Deezer HTTP ${response.status}` }, 502);
@@ -376,6 +430,14 @@ async function albumDetail(env, req, albumId) {
       console.error("Failed to resolve album track", rt.source_id, e);
       tracks.push({ ...rt, id: null });
     }
+  }
+
+  const validTrackIds = tracks.map(t => t.id).filter(id => id != null);
+  if (validTrackIds.length && ctx) {
+    ctx.waitUntil(
+      cacheWholeAlbum(env, String(data.id), data.title, data.artist?.name || null, validTrackIds)
+        .catch(e => console.error("Whole-album caching failed", albumId, e))
+    );
   }
 
   return json({
@@ -481,7 +543,7 @@ export default {
 
     if (path === "/api/v1/albums/search" && req.method === "GET") return albumSearch(env, req);
     const albumMatch = path.match(/^\/api\/v1\/albums\/([^/]+)$/);
-    if (albumMatch && req.method === "GET") return albumDetail(env, req, albumMatch[1]);
+    if (albumMatch && req.method === "GET") return albumDetail(env, req, albumMatch[1], ctx);
 
     const acquireMatch = path.match(/^\/api\/v1\/tracks\/([0-9]+)\/acquire$/);
     if (acquireMatch && req.method === "POST") return acquireTrack(env, req, acquireMatch[1]);
