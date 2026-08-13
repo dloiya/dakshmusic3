@@ -22,6 +22,44 @@ jobs:
         with:
           node-version: 22
 
+      - name: Backfill Apple duration resolution in acquisition code
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('serverless/entry.js')
+          s = p.read_text()
+          old = '''  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
+          if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);'''
+          new = '''  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
+
+          // Apple imports may lack duration_ms. Resolve the canonical catalog
+          // duration before dispatch so strict identity validation remains intact.
+          if (!track.duration_ms && String(track.source || '').toLowerCase() === 'apple' && track.source_id) {
+            try {
+              const lookup = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(track.source_id)}&entity=song`);
+              if (lookup.ok) {
+                const data = await lookup.json();
+                const song = (data.results || []).find(x => x.wrapperType === 'track' && x.trackTimeMillis);
+                if (song?.trackTimeMillis) {
+                  track.duration_ms = Number(song.trackTimeMillis);
+                  await env.DB.prepare(`UPDATE tracks SET duration_ms=? WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`).bind(track.duration_ms, trackId).run();
+                }
+              }
+            } catch (e) {
+              console.warn('Apple duration lookup failed', track.source_id, e);
+            }
+          }
+
+          if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);'''
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+              print('Applied Apple duration backfill patch')
+          elif 'Apple imports may lack duration_ms.' in s:
+              print('Apple duration backfill already present')
+          else:
+              raise SystemExit('Acquisition duration guard not found')
+          PY
+
       - name: Install Wrangler
         working-directory: serverless
         run: npm install --no-audit --no-fund
@@ -50,10 +88,6 @@ jobs:
           npx wrangler d1 execute dakshmusic3 --remote --command "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','index') ORDER BY type,name;"
 
           echo '--- Reconcile migrations whose schema changes already exist ---'
-          # Production was initialized with the current schema.sql, so these
-          # schema changes already exist even though their Wrangler migration
-          # records are missing. Mark only those migrations as applied instead
-          # of replaying ALTER TABLE against columns that already exist.
           npx wrangler d1 execute dakshmusic3 --remote --command "
             INSERT OR IGNORE INTO d1_migrations(name) SELECT '002_add_track_isrc.sql'
               WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'isrc');
