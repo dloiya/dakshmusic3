@@ -1,0 +1,39 @@
+name: Wire Player UI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Ensure player UI is loaded
+        run: |
+          set -euo pipefail
+          if grep -q 'player-ui.js' frontend/index.html; then
+            echo 'player-ui.js already wired'
+            exit 0
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('frontend/index.html')
+          s = p.read_text()
+          marker = '<script src="playlist-ui.js"></script>'
+          if marker not in s:
+              raise SystemExit('playlist-ui.js script tag not found')
+          s = s.replace(marker, marker + '\n<script src="player-ui.js"></script>', 1)
+          p.write_text(s)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add frontend/index.html
+          git commit -m 'Wire interactive player UI'
+          git push
