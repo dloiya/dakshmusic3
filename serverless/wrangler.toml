@@ -1,5 +1,5 @@
 name = "dakshmusic3"
-main = "app.js"
+main = "app_v2.js"
 compatibility_date = "2026-07-01"
 account_id = "ed9504226c687dce2353fbc23a1d5890"
 workers_dev = true
@@ -13,6 +13,9 @@ DEVICE_CACHE_LIMIT = "10"
 DEEZER_API = "https://api.deezer.com"
 GITHUB_OWNER = "dloiya"
 GITHUB_REPO = "dakshmusic3"
+
+[triggers]
+crons = ["*/1 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
