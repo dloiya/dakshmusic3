@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   album_id TEXT,
   duration_ms INTEGER,
   artwork_url TEXT,
+  natural_key TEXT UNIQUE,
   play_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

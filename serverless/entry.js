@@ -38,6 +38,38 @@ async function pbkdf2(password, saltB64) {
   return b64(new Uint8Array(bits));
 }
 
+function slug(s) {
+  return String(s || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "unknown";
+}
+
+function todayDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildNaturalKey(title, artist, album, dateStr) {
+  return `${slug(title)}-${slug(artist)}-${slug(album || "unknown")}-${dateStr}`;
+}
+
+async function findOrPrepareTrack(env, { source, source_id, source_url, title, artist, album, album_id, duration_ms, artwork_url }) {
+  let track = source_id ? await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(source_id).first() : null;
+  if (!track) {
+    track = await env.DB.prepare(`
+      SELECT * FROM tracks
+      WHERE LOWER(title)=LOWER(?) AND LOWER(artist)=LOWER(?) AND LOWER(COALESCE(album,''))=LOWER(COALESCE(?,''))
+      LIMIT 1
+    `).bind(title, artist || "", album || "").first();
+  }
+  if (track) return track;
+
+  const naturalKey = buildNaturalKey(title, artist, album, todayDate());
+  const created = await env.DB.prepare(`
+    INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url,natural_key)
+    VALUES(?,?,?,?,?,?,?,?,?,?)
+  `).bind(source || "deezer", source_id || null, source_url || null, title, artist || "", album || null, album_id || null, duration_ms || null, artwork_url || null, naturalKey).run();
+  return await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(created.meta.last_row_id).first();
+}
+
 async function ensureTopCache(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS top_played_cache (rank INTEGER PRIMARY KEY, track_id INTEGER NOT NULL UNIQUE, storage_key TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
 }
@@ -116,11 +148,12 @@ async function uploadAudio(env, req, jobId) {
   if (!supplied || supplied !== env.CALLBACK_SECRET) return json({ error: "Unauthorized" }, 401);
   const job = await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(jobId).first();
   if (!job) return json({ error: "Job not found" }, 404);
+  const track = await env.DB.prepare(`SELECT natural_key FROM tracks WHERE id=?`).bind(job.track_id).first();
   const url = new URL(req.url);
   const provider = url.searchParams.get("provider") || null;
   const format = url.searchParams.get("format") || "flac";
   const contentType = req.headers.get("content-type") || (format === "mp3" ? "audio/mpeg" : "audio/flac");
-  const storageKey = `tracks/${job.track_id}.${format}`;
+  const storageKey = `${track?.natural_key || `track-${job.track_id}`}.${format}`;
 
   await env.AUDIO_BUCKET.put(storageKey, req.body, { httpMetadata: { contentType } });
   await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
@@ -183,7 +216,6 @@ async function appleImport(env, req, ctx) {
     try {
       const found = await deezerSearch(item.title, item.artist);
       if (!found) { unmatched.push({ title: item.title, artist: item.artist }); continue; }
-      let track = await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(String(found.id)).first();
       if (found.album?.id) {
         try {
           await upsertLightAlbum(env, {
@@ -194,11 +226,17 @@ async function appleImport(env, req, ctx) {
           });
         } catch (e) { console.error("Album upsert failed (apple import)", found.album.id, e); }
       }
-      if (!track) {
-        const created = await env.DB.prepare(`INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url) VALUES('deezer',?,?,?,?,?,?,?,?)`)
-          .bind(String(found.id), found.link, found.title, found.artist?.name || item.artist || "", found.album?.title || item.album || null, found.album?.id ? String(found.album.id) : null, (found.duration || 0) * 1000, found.album?.cover_xl || found.album?.cover_big || null).run();
-        track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(created.meta.last_row_id).first();
-      }
+      const track = await findOrPrepareTrack(env, {
+        source: "deezer",
+        source_id: String(found.id),
+        source_url: found.link,
+        title: found.title,
+        artist: found.artist?.name || item.artist || "",
+        album: found.album?.title || item.album || null,
+        album_id: found.album?.id ? String(found.album.id) : null,
+        duration_ms: (found.duration || 0) * 1000,
+        artwork_url: found.album?.cover_xl || found.album?.cover_big || null,
+      });
       const importedCount = Math.max(0, item.play_count);
       await env.DB.prepare(`UPDATE tracks SET play_count=MAX(play_count,?),updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(importedCount, track.id).run();
       matched.push({ track_id: track.id, title: track.title, artist: track.artist, play_count: importedCount });
@@ -219,7 +257,6 @@ async function appleImport(env, req, ctx) {
 
 async function addPlaylistEntry(env, body) {
   if (!body?.title) return json({ error: "Track title is required" }, 400);
-  let track = body.source_id ? await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(body.source_id).first() : null;
   if (body.album_id) {
     try {
       await upsertLightAlbum(env, {
@@ -230,11 +267,7 @@ async function addPlaylistEntry(env, body) {
       });
     } catch (e) { console.error("Album upsert failed (playlist add)", body.album_id, e); }
   }
-  if (!track) {
-    const created = await env.DB.prepare(`INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url) VALUES(?,?,?,?,?,?,?,?,?)`)
-      .bind(body.source || "deezer", body.source_id || null, body.source_url || null, body.title, body.artist || "", body.album || null, body.album_id || null, body.duration_ms || null, body.artwork_url || null).run();
-    track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(created.meta.last_row_id).first();
-  }
+  const track = await findOrPrepareTrack(env, body);
 
   const existingEntry = await env.DB.prepare(`SELECT id, position FROM playlist_entries WHERE track_id=?`).bind(track.id).first();
   if (existingEntry) {

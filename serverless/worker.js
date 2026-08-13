@@ -9,6 +9,25 @@ const json = (data, status = 200, extra = {}) =>
 
 const now = () => Math.floor(Date.now() / 1000);
 
+function slug(s) {
+  return (
+    String(s || "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "unknown"
+  );
+}
+
+function todayDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildNaturalKey(title, artist, album, dateStr) {
+  return `${slug(title)}-${slug(artist)}-${slug(album || "unknown")}-${dateStr}`;
+}
+
 /* =========================================================
    ENCODING / CRYPTO
    ========================================================= */
@@ -418,9 +437,35 @@ async function getOrCreateTrack(env, body) {
       .first();
   }
 
+  if (!track) {
+    track = await env.DB.prepare(
+      `
+      SELECT *
+      FROM tracks
+      WHERE LOWER(title) = LOWER(?)
+        AND LOWER(artist) = LOWER(?)
+        AND LOWER(COALESCE(album, '')) = LOWER(COALESCE(?, ''))
+      LIMIT 1
+      `
+    )
+      .bind(
+        body.title,
+        body.artist || "",
+        body.album || ""
+      )
+      .first();
+  }
+
   if (track) {
     return track;
   }
+
+  const naturalKey = buildNaturalKey(
+    body.title,
+    body.artist,
+    body.album,
+    todayDate()
+  );
 
   const result = await env.DB.prepare(
     `
@@ -433,9 +478,10 @@ async function getOrCreateTrack(env, body) {
       album,
       album_id,
       duration_ms,
-      artwork_url
+      artwork_url,
+      natural_key
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
   )
     .bind(
@@ -447,7 +493,8 @@ async function getOrCreateTrack(env, body) {
       body.album || null,
       body.album_id || null,
       body.duration_ms || null,
-      body.artwork_url || null
+      body.artwork_url || null,
+      naturalKey
     )
     .run();
 
