@@ -3,12 +3,17 @@
   const playlistView = document.getElementById("view-playlist");
   const playlistList = document.getElementById("list-playlist");
   const audio = document.getElementById("audio");
+  const center = document.getElementById("btnCenter");
+  const next = document.getElementById("btnNext");
+  const prev = document.getElementById("btnPrev");
   if (!playlistView || !playlistList || !audio) return;
 
   const esc = v => String(v ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#039;"}[c]));
   let rows = [];
   let query = "";
-  let timer = null;
+  let selected = 0;
+  let searchQueue = [];
+  let queueIndex = -1;
 
   const search = document.createElement("input");
   search.type = "search";
@@ -22,8 +27,7 @@
   status.className = "playlist-search-status";
   playlistView.insertBefore(status, playlistList);
 
-  // Acquisition status lives in the device footer and is collapsed/hidden
-  // until explicitly opened, keeping the main player UI clean.
+  // Acquisition status lives in the device footer and is collapsed by default.
   const footer = document.createElement("footer");
   footer.className = "app-footer";
   footer.innerHTML = `
@@ -35,34 +39,21 @@
 
   function filtered() {
     const q = query.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter(t => [t.title,t.artist,t.album,t.isrc,t.source,t.source_id].some(v => String(v || "").toLowerCase().includes(q)));
-  }
-
-  function play(t, list = filtered()) {
-    if (!t?.id && !t?.track_id) return;
-    if (typeof window.__setPlaylistSearchQueue === "function") {
-      const queue = Array.isArray(list) ? list : [t];
-      const start = queue.findIndex(x => (x.id ?? x.track_id) === (t.id ?? t.track_id));
-      const ordered = start > 0 ? queue.slice(start).concat(queue.slice(0, start)) : queue;
-      window.__setPlaylistSearchQueue(ordered);
-      return;
-    }
-    const id = t.id ?? t.track_id;
-    audio.src = `${API}/playback/${encodeURIComponent(id)}`;
-    audio.play().catch(() => {});
+    return q ? rows.filter(t => [t.title,t.artist,t.album,t.isrc,t.source,t.source_id]
+      .some(v => String(v || "").toLowerCase().includes(q))) : rows;
   }
 
   function render() {
     const list = filtered();
+    if (selected >= list.length) selected = Math.max(0, list.length - 1);
     status.textContent = query ? `${list.length} result${list.length === 1 ? "" : "s"}` : `${rows.length} tracks`;
     playlistList.innerHTML = list.length ? list.map((t, i) => `
-      <li data-play-index="${i}">
+      <li data-play-index="${i}" class="${i === selected ? "sel" : ""}">
         <div class="l"><span class="name">${esc(t.title || "Untitled")}</span></div>
         <span class="sub">${esc(t.artist || "")}${t.album ? ` · ${esc(t.album)}` : ""}</span>
       </li>`).join("") : `<li class="empty">No matching tracks.</li>`;
     playlistList.querySelectorAll("[data-play-index]").forEach(li => {
-      li.addEventListener("click", () => play(list[Number(li.dataset.playIndex)], list));
+      li.addEventListener("click", () => { selected = Number(li.dataset.playIndex); render(); });
     });
   }
 
@@ -76,9 +67,64 @@
     } catch {}
   }
 
-  search.addEventListener("input", () => { query = search.value; render(); });
+  async function startSearchQueue() {
+    const list = filtered();
+    if (!list.length) return;
+
+    if (searchQueue.length || audio.src) {
+      const clear = confirm("Clear the current queue and play the search results?\n\nOK = clear queue\nCancel = append search results");
+      if (clear) searchQueue = [];
+    }
+
+    // Simple queue semantics: either replace the queue or append the results.
+    searchQueue.push(...list);
+    queueIndex = searchQueue.length - list.length + selected;
+    playQueueItem();
+  }
+
+  function playQueueItem() {
+    const track = searchQueue[queueIndex];
+    if (!track) return;
+    const id = track.id ?? track.track_id;
+    if (id == null) return;
+    audio.src = `${API}/playback/${encodeURIComponent(id)}`;
+    audio.play().catch(() => {});
+  }
+
+  // Search results are selected first. The iPod centre button is the action.
+  // Capture the click so the normal app selection handler does not play the
+  // old playlist row directly.
+  center?.addEventListener("click", e => {
+    if (document.getElementById("view-playlist")?.classList.contains("active") && query.trim()) {
+      e.stopImmediatePropagation();
+      startSearchQueue();
+    }
+  }, true);
+
+  next?.addEventListener("click", e => {
+    if (searchQueue.length && document.getElementById("view-playlist")?.classList.contains("active")) {
+      e.stopImmediatePropagation();
+      if (queueIndex < searchQueue.length - 1) { queueIndex++; playQueueItem(); }
+    }
+  }, true);
+
+  prev?.addEventListener("click", e => {
+    if (searchQueue.length && document.getElementById("view-playlist")?.classList.contains("active")) {
+      e.stopImmediatePropagation();
+      if (queueIndex > 0) { queueIndex--; playQueueItem(); }
+    }
+  }, true);
+
+  audio.addEventListener("ended", () => {
+    if (searchQueue.length && queueIndex < searchQueue.length - 1) {
+      queueIndex++;
+      playQueueItem();
+    }
+  });
+
+  search.addEventListener("input", () => { query = search.value; selected = 0; render(); });
   search.addEventListener("keydown", e => {
-    if (e.key === "Escape") { search.value = ""; query = ""; render(); }
+    if (e.key === "Escape") { search.value = ""; query = ""; selected = 0; render(); }
   });
 
   document.getElementById("acquisitionToggle")?.addEventListener("click", () => {
@@ -120,6 +166,8 @@
       .acquisition-panel{width:100%;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif}
       #acquisitionToggle{width:100%;border:1px solid #cfcdc7;border-radius:6px;background:#e9e7e2;color:#5b625d;padding:5px 8px;text-align:left;font:600 10px inherit;cursor:pointer}
       #acquisitionBody{margin-top:4px;background:#f2f1ee;border:1px solid #cfcdc7;border-radius:6px;padding:5px;max-height:140px;overflow:auto}
+      .menu li.sel{background:linear-gradient(180deg,var(--sel-a),var(--sel-b));color:var(--sel-ink)}
+      .menu li.sel .sub{color:#dbe6f5}
       .acq-row{position:relative;padding:5px 4px;border-bottom:1px solid rgba(0,0,0,.07);font-size:9.5px;color:#1b1f1c}.acq-row:last-child{border-bottom:0}.acq-row strong{display:block}.acq-row small{display:block;color:#5b625d;margin-top:1px}.acq-row>span{position:absolute;right:4px;top:6px;font-size:8.5px;color:#5b625d}.acq-row.failed>span{color:#b34c3c}.acq-error{margin-top:4px;color:#b34c3c;white-space:pre-wrap;word-break:break-word}.acq-empty{padding:7px;text-align:center;color:#5b625d;font-size:9px}
     `;
     document.head.appendChild(s);
