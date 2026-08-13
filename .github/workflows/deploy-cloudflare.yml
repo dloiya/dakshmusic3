@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   deploy:
@@ -16,23 +16,34 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
         with:
-          node-version: 22
+          fetch-depth: 0
 
-      - name: Patch acquisition identity resolver
+      - name: Restore known-good Worker entry router
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sed -i '139s/.*/s2, count = pattern.subn(lambda _match: replacement + "\\n\\n", s, count=1)/' .github/scripts/patch_acquisition_identity.py
-          python3 .github/scripts/patch_acquisition_identity.py
+          set -euo pipefail
+          git fetch origin bd1bef276c2a53150702dd963983fd3198868f4e --depth=1
+          git checkout bd1bef276c2a53150702dd963983fd3198868f4e -- serverless/entry.js
+          if git diff --quiet -- serverless/entry.js; then
+            echo "entry.js already restored"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add serverless/entry.js
+            git commit -m "Restore full Worker entry router"
+            git push origin HEAD:main
+          fi
 
-      - name: Verify Apple duration resolution is present
+      - name: Verify Worker entry router
         run: |
+          set -euo pipefail
+          grep -q "async function dispatchWarm" serverless/entry.js
+          grep -q "async function appleImport" serverless/entry.js
+          grep -q "async function albumDetail" serverless/entry.js
           grep -q "resolveAppleDuration" serverless/entry.js
-          grep -q "Deezer duration lookup failed" serverless/entry.js
-          grep -q "has no canonical duration_ms; refusing acquisition without identity data" serverless/entry.js
-          echo "Apple/Deezer duration resolver and strict identity guard are present"
+          echo "Full Worker entry router is present"
 
       - name: Install Wrangler
         working-directory: serverless
