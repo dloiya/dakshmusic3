@@ -277,7 +277,8 @@
     const s = { key: "queue", title: "Queue", kind: "menu", selected: 0, items: [], emptyText: "" };
     push(s);
     try {
-      const rows = await getPlaylist();
+      const searchQueue = nowPlayingMode === "playlist" && Array.isArray(nowPlayingList) && nowPlayingList.length ? nowPlayingList : null;
+      const rows = searchQueue || await getPlaylist();
       playlistCache = rows;
       const items = [{ html: miniPlayerHtml(), action: () => push(nowPlayingScreen()) }];
       let upNext = rows;
@@ -564,6 +565,16 @@
   }
 
   let nowPlayingMode = null; // 'playlist' | 'album' | null
+
+  // Playlist search uses the same player queue as the iPod Queue screen.
+  // This keeps search results ephemeral: they become the playback queue without
+  // modifying the persisted playlist.
+  window.__setPlaylistSearchQueue = (tracks) => {
+    const queue = Array.isArray(tracks) ? tracks.filter(t => t && (t.id != null || t.track_id != null)) : [];
+    if (!queue.length) return;
+    playTrack(queue[0], queue, "playlist");
+    toast(`${queue.length} search result${queue.length === 1 ? "" : "s"} queued`);
+  };
 
   function playTrack(track, listContext, mode = null) {
     nowPlayingTrack = track;

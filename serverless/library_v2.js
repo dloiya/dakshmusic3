@@ -56,10 +56,21 @@ async function seed(env, req, ctx) {
     const chunk = items.slice(offset, offset + 150);
     const statements = chunk.map((x, i) => {
       const sourceId = x.source_id ? `apple:${String(x.source_id)}` : null;
+      const sourceUrl = x.source_url || (x.source_id ? `https://music.apple.com/us/song/${slug(x.title)}/${String(x.source_id)}` : null);
       return env.DB.prepare(`INSERT OR IGNORE INTO tracks(source,source_id,source_url,title,artist,album,duration_ms,isrc,artwork_url,natural_key,play_count) VALUES('apple',?,?,?,?,?,?,?,?,?,0)`)
-        .bind(sourceId, x.source_url || null, x.title, x.artist || "", x.album || null, Number(x.duration_ms) || null, x.isrc || null, x.artwork_url || null, naturalKey(x, offset + i));
+        .bind(sourceId, sourceUrl, x.title, x.artist || "", x.album || null, Number(x.duration_ms) || null, x.isrc || null, x.artwork_url || null, naturalKey(x, offset + i));
     });
     await env.DB.batch(statements);
+  }
+
+  // Older seeds created Apple tracks without source_url. Backfill those rows
+  // from the canonical Apple catalog id so acquisition has a resolvable source.
+  const { results: sourceRows = [] } = await env.DB.prepare(`SELECT id,source_id,title FROM tracks WHERE source='apple' AND (source_url IS NULL OR source_url='') AND source_id IS NOT NULL`).all();
+  if (sourceRows.length) {
+    for (let offset = 0; offset < sourceRows.length; offset += 100) {
+      const chunk = sourceRows.slice(offset, offset + 100);
+      await env.DB.batch(chunk.map(t => env.DB.prepare(`UPDATE tracks SET source_url=? WHERE id=?`).bind(`https://music.apple.com/us/song/${slug(t.title)}/${String(t.source_id).replace(/^apple:/, '')}`, t.id)));
+    }
   }
 
   const playlistRows = [];

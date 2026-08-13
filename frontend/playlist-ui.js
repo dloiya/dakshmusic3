@@ -35,13 +35,18 @@
     return rows.filter(t => [t.title,t.artist,t.album,t.isrc,t.source,t.source_id].some(v => String(v || "").toLowerCase().includes(q)));
   }
 
-  function play(t) {
+  function play(t, list = filtered()) {
     if (!t?.id && !t?.track_id) return;
+    if (typeof window.__setPlaylistSearchQueue === "function") {
+      const queue = Array.isArray(list) ? list : [t];
+      const start = queue.findIndex(x => (x.id ?? x.track_id) === (t.id ?? t.track_id));
+      const ordered = start > 0 ? queue.slice(start).concat(queue.slice(0, start)) : queue;
+      window.__setPlaylistSearchQueue(ordered);
+      return;
+    }
     const id = t.id ?? t.track_id;
     audio.src = `${API}/playback/${encodeURIComponent(id)}`;
     audio.play().catch(() => {});
-    const title = document.getElementById("screenTitle");
-    if (title) title.textContent = t.title || "Now Playing";
   }
 
   function render() {
@@ -53,7 +58,7 @@
         <span class="sub">${esc(t.artist || "")}${t.album ? ` · ${esc(t.album)}` : ""}</span>
       </li>`).join("") : `<li class="empty">No matching tracks.</li>`;
     playlistList.querySelectorAll("[data-play-index]").forEach(li => {
-      li.addEventListener("click", () => play(list[Number(li.dataset.playIndex)]));
+      li.addEventListener("click", () => play(list[Number(li.dataset.playIndex)], list));
     });
   }
 
