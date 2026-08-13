@@ -6,7 +6,8 @@ workers_dev = true
 
 [vars]
 ENVIRONMENT = "production"
-GENERAL_CACHE_LIMIT = "200"
+GENERAL_CACHE_LIMIT = "30"
+TOP_CACHE_LIMIT = "200"
 MAX_ALBUM_SESSIONS = "5"
 DEVICE_CACHE_LIMIT = "10"
 DEEZER_API = "https://api.deezer.com"
