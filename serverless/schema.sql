@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS download_jobs (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS albums (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL DEFAULT 'deezer',
+  source_id TEXT UNIQUE,
+  title TEXT,
+  artist TEXT,
+  artwork_url TEXT,
+  release_date TEXT,
+  genre TEXT,
+  tracks_count INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   id_hash TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
@@ -78,3 +92,4 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON download_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tracks_play_count ON tracks(play_count DESC);
 CREATE INDEX IF NOT EXISTS idx_album_sessions_access ON album_sessions(last_accessed_at);
 CREATE INDEX IF NOT EXISTS idx_top_played_track ON top_played_cache(track_id);
+CREATE INDEX IF NOT EXISTS idx_albums_source_id ON albums(source_id);

@@ -347,8 +347,64 @@ async function nextPosition(env) {
   return row?.p || 1;
 }
 
+async function upsertAlbum(
+  env,
+  {
+    source,
+    source_id,
+    title,
+    artist,
+    artwork_url,
+  }
+) {
+  if (!source_id) {
+    return;
+  }
+
+  await env.DB.prepare(
+    `
+    INSERT INTO albums (
+      source,
+      source_id,
+      title,
+      artist,
+      artwork_url
+    )
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(source_id) DO UPDATE SET
+      title = excluded.title,
+      artist = excluded.artist,
+      artwork_url =
+        COALESCE(
+          albums.artwork_url,
+          excluded.artwork_url
+        ),
+      updated_at = CURRENT_TIMESTAMP
+    `
+  )
+    .bind(
+      source || "deezer",
+      source_id,
+      title || null,
+      artist || null,
+      artwork_url || null
+    )
+    .run();
+}
+
 async function getOrCreateTrack(env, body) {
   let track = null;
+
+  if (body.album_id) {
+    await upsertAlbum(env, {
+      source: body.source || "deezer",
+      source_id: body.album_id,
+      title: body.album || null,
+      artist: body.artist || null,
+      artwork_url:
+        body.artwork_url || null,
+    });
+  }
 
   if (body.source_id) {
     track = await env.DB.prepare(

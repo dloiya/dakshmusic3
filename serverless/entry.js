@@ -161,6 +161,16 @@ async function appleImport(env, req, ctx) {
       const found = await deezerSearch(item.title, item.artist);
       if (!found) { unmatched.push({ title: item.title, artist: item.artist }); continue; }
       let track = await env.DB.prepare(`SELECT * FROM tracks WHERE source_id=?`).bind(String(found.id)).first();
+      if (found.album?.id) {
+        try {
+          await upsertLightAlbum(env, {
+            source_id: String(found.album.id),
+            title: found.album.title || item.album || null,
+            artist: found.artist?.name || item.artist || null,
+            artwork_url: found.album.cover_xl || found.album.cover_big || null,
+          });
+        } catch (e) { console.error("Album upsert failed (apple import)", found.album.id, e); }
+      }
       if (!track) {
         const created = await env.DB.prepare(`INSERT INTO tracks(source,source_id,source_url,title,artist,album,album_id,duration_ms,artwork_url) VALUES('deezer',?,?,?,?,?,?,?,?)`)
           .bind(String(found.id), found.link, found.title, found.artist?.name || item.artist || "", found.album?.title || item.album || null, found.album?.id ? String(found.album.id) : null, (found.duration || 0) * 1000, found.album?.cover_xl || found.album?.cover_big || null).run();
@@ -218,6 +228,35 @@ async function playlistMutation(env, req, entryId) {
   return json({ ok: true, position: target });
 }
 
+async function upsertRichAlbum(env, data) {
+  const genre = data.genres?.data?.[0]?.name || null;
+  const artwork = data.cover_xl || data.cover_big || data.cover_medium || null;
+  await env.DB.prepare(`
+    INSERT INTO albums (source, source_id, title, artist, artwork_url, release_date, genre, tracks_count)
+    VALUES ('deezer', ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(source_id) DO UPDATE SET
+      title=excluded.title, artist=excluded.artist, artwork_url=excluded.artwork_url,
+      release_date=excluded.release_date, genre=excluded.genre, tracks_count=excluded.tracks_count,
+      updated_at=CURRENT_TIMESTAMP
+  `).bind(
+    String(data.id), data.title || null, data.artist?.name || null, artwork,
+    data.release_date || null, genre, data.nb_tracks || null
+  ).run();
+}
+
+async function upsertLightAlbum(env, { source_id, title, artist, artwork_url, tracks_count }) {
+  if (!source_id) return;
+  await env.DB.prepare(`
+    INSERT INTO albums (source, source_id, title, artist, artwork_url, tracks_count)
+    VALUES ('deezer', ?, ?, ?, ?, ?)
+    ON CONFLICT(source_id) DO UPDATE SET
+      title=excluded.title, artist=excluded.artist,
+      artwork_url=COALESCE(albums.artwork_url, excluded.artwork_url),
+      tracks_count=COALESCE(albums.tracks_count, excluded.tracks_count),
+      updated_at=CURRENT_TIMESTAMP
+  `).bind(source_id, title || null, artist || null, artwork_url || null, tracks_count || null).run();
+}
+
 async function albumSearch(env, req) {
   if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
   const url = new URL(req.url);
@@ -229,15 +268,18 @@ async function albumSearch(env, req) {
   const response = await fetch(dz);
   if (!response.ok) return json({ error: `Deezer HTTP ${response.status}` }, 502);
   const data = await response.json();
-  return json({
-    items: (data.data || []).map(x => ({
-      album_id: String(x.id),
-      title: x.title,
-      artist: x.artist?.name || null,
-      artwork_url: x.cover_xl || x.cover_big || x.cover_medium || null,
-      tracks_count: x.nb_tracks || null,
-    })),
-  });
+  const items = (data.data || []).map(x => ({
+    album_id: String(x.id),
+    title: x.title,
+    artist: x.artist?.name || null,
+    artwork_url: x.cover_xl || x.cover_big || x.cover_medium || null,
+    tracks_count: x.nb_tracks || null,
+  }));
+  for (const it of items) {
+    try { await upsertLightAlbum(env, { source_id: it.album_id, ...it }); }
+    catch (e) { console.error("Album upsert failed", it.album_id, e); }
+  }
+  return json({ items });
 }
 
 async function albumDetail(env, req, albumId) {
@@ -247,11 +289,13 @@ async function albumDetail(env, req, albumId) {
   const data = await response.json();
   if (data.error) return json({ error: data.error.message || "Album not found" }, 404);
   const artwork = data.cover_xl || data.cover_big || data.cover_medium || null;
+  try { await upsertRichAlbum(env, data); } catch (e) { console.error("Rich album upsert failed", albumId, e); }
   return json({
     album_id: String(data.id),
     title: data.title,
     artist: data.artist?.name || null,
     artwork_url: artwork,
+    release_date: data.release_date || null,
     tracks: (data.tracks?.data || []).map(x => ({
       source: "deezer",
       source_id: String(x.id),
