@@ -52,31 +52,68 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           chmod +x providers/primary.sh providers/fallback.sh
 
           verify() {
             python3 providers/validate_audio.py /tmp/output.flac
           }
 
-          rm -f /tmp/output.flac
-          if providers/primary.sh && test -s /tmp/output.flac; then
-            echo "Primary provider produced audio; validating metadata..."
-            if verify; then
-              echo "provider=primary" >> "$GITHUB_OUTPUT"
-              exit 0
+          MAX_ATTEMPTS=3
+          success=0
+
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            echo "=================================================="
+            echo "Acquisition worker attempt $attempt/$MAX_ATTEMPTS"
+            echo "Requested: $AUDIO_TITLE — $AUDIO_ARTIST"
+            echo "=================================================="
+
+            rm -f /tmp/output.flac
+
+            # First try the primary provider.
+            if providers/primary.sh && test -s /tmp/output.flac; then
+              echo "Primary provider produced audio; validating metadata..."
+              if verify; then
+                echo "provider=primary" >> "$GITHUB_OUTPUT"
+                success=1
+                break
+              fi
+              echo "VALIDATION FAILED: primary provider returned the wrong recording."
+              echo "Discarding the file and continuing to the fallback provider."
+              rm -f /tmp/output.flac
+            else
+              echo "Primary provider failed; continuing to fallback provider."
+              rm -f /tmp/output.flac
             fi
-            echo "Primary provider returned the wrong recording; rejecting it and trying fallback."
-          else
-            echo "Primary provider failed; trying fallback."
+
+            # Fallback provider is also validated. A bad fallback result is
+            # discarded and the entire acquisition worker is retried.
+            if providers/fallback.sh && test -s /tmp/output.flac; then
+              echo "Fallback provider produced audio; validating metadata..."
+              if verify; then
+                echo "provider=fallback" >> "$GITHUB_OUTPUT"
+                success=1
+                break
+              fi
+              echo "VALIDATION FAILED: fallback provider returned the wrong recording."
+              rm -f /tmp/output.flac
+            else
+              echo "Fallback provider failed."
+              rm -f /tmp/output.flac
+            fi
+
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "Validation/acquisition failed. Re-running the acquisition worker in 5 seconds..."
+              sleep 5
+            fi
+          done
+
+          if [ "$success" -ne 1 ]; then
+            echo "ERROR: No provider produced a metadata-verified recording after $MAX_ATTEMPTS worker attempts."
+            exit 1
           fi
 
-          rm -f /tmp/output.flac
-          providers/fallback.sh
           test -s /tmp/output.flac
-          echo "Fallback provider produced audio; validating metadata..."
-          verify
-          echo "provider=fallback" >> "$GITHUB_OUTPUT"
           file /tmp/output.flac
 
       - name: Upload to R2 and complete job
