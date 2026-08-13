@@ -3,8 +3,8 @@
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
-    "db:local": "wrangler d1 execute music-library --local --file=./schema.sql",
-    "db:remote": "wrangler d1 execute music-library --remote --file=./schema.sql"
+    "db:local": "wrangler d1 execute dakshmusic3 --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute dakshmusic3 --remote --file=./schema.sql"
   },
   "devDependencies": {
     "wrangler": "^4.30.0"
