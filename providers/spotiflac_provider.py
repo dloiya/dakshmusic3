@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from resolve_apple import apple_music_url_from_search
+from resolve_apple import resolve_apple_music_url
 
 
 def _patch_redirects():
@@ -68,7 +68,7 @@ def main():
     if "music.apple.com" in source:
         resolved = source
     else:
-        resolved = apple_music_url_from_search(title, artist, album)
+        resolved = resolve_apple_music_url(title, artist, album, source_url=source)
 
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
