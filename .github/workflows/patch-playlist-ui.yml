@@ -1,0 +1,38 @@
+name: Patch Playlist UI
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Add playlist search and acquisition status UI'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch index
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('frontend/index.html')
+          s = p.read_text(encoding='utf-8')
+          old = '<script src="app.js"></script>'
+          new = old + '\n<script src="playlist-ui.js"></script>'
+          if 'playlist-ui.js' not in s:
+              if old not in s:
+                  raise SystemExit('app.js script tag not found')
+              s = s.replace(old, new, 1)
+              p.write_text(s, encoding='utf-8')
+          PY
+      - name: Commit and remove patch workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/index.html
+          git commit -m "Load playlist UI enhancements" || true
+          git rm .github/workflows/patch-playlist-ui.yml
+          git commit -m "Remove one-time playlist UI patch workflow"
+          git push
