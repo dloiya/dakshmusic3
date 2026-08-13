@@ -1,0 +1,115 @@
+name: Fix Acquisition Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore confirmed Worker router
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin ce7ead0f7f7a575a5266a92efadc9b9223d88842 --depth=1
+          git checkout ce7ead0f7f7a575a5266a92efadc9b9223d88842 -- serverless/entry.js
+
+      - name: Patch acquisition API and UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          entry = Path("serverless/entry.js")
+          s = entry.read_text()
+
+          helper = '''
+          async function listAcquisitions(env, req) {
+            if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+            const url = new URL(req.url);
+            const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+            const status = url.searchParams.get("status");
+            const sql = status
+              ? `SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id WHERE j.status=? ORDER BY datetime(j.created_at) DESC LIMIT ?`
+              : `SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id ORDER BY datetime(j.created_at) DESC LIMIT ?`;
+            const result = status ? await env.DB.prepare(sql).bind(status, limit).all() : await env.DB.prepare(sql).bind(limit).all();
+            return json({ items: result.results || [], limit });
+          }
+
+          async function acquisitionSummary(env, req) {
+            if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+            const result = await env.DB.prepare(`SELECT status,COUNT(*) AS count FROM download_jobs GROUP BY status`).all();
+            const counts = {};
+            for (const row of result.results || []) counts[row.status] = Number(row.count || 0);
+            return json({ counts, active: (counts.queued || 0) + (counts.dispatched || 0) + (counts.running || 0) });
+          }
+
+          '''
+          if "async function listAcquisitions(env, req)" not in s:
+              marker = "export default {"
+              if marker not in s:
+                  raise SystemExit("entry.js export marker not found")
+              s = s.replace(marker, helper + marker, 1)
+
+          route = '''    const path = url.pathname;
+
+    if ((path === "/api/v1/acquisitions" || path === "/api/v1/jobs") && req.method === "GET") return listAcquisitions(env, req);
+    if (path === "/api/v1/acquisitions/summary" && req.method === "GET") return acquisitionSummary(env, req);
+'''
+          if 'path === "/api/v1/acquisitions"' not in s:
+              marker = "    const path = url.pathname;"
+              if marker not in s:
+                  raise SystemExit("entry.js path marker not found")
+              s = s.replace(marker, route, 1)
+
+          entry.write_text(s)
+
+          ui = Path("frontend/playlist-ui.js")
+          u = ui.read_text()
+          u = u.replace("`${API}/jobs/status`", "`${API}/acquisitions?limit=100`")
+          u = u.replace("const jobs = data.jobs || [];", "const jobs = Array.isArray(data) ? data : (data.items || []);")
+          ui.write_text(u)
+          PY
+
+      - name: Verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "async function dispatchWarm" serverless/entry.js
+          grep -q "async function appleImport" serverless/entry.js
+          grep -q "async function listAcquisitions" serverless/entry.js
+          grep -q '/api/v1/acquisitions' frontend/playlist-ui.js
+
+      - name: Commit repaired source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add serverless/entry.js frontend/playlist-ui.js
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix acquisition status API and UI"
+            git push origin HEAD:main
+          fi
+
+      - name: Install Wrangler
+        working-directory: serverless
+        run: npm install --no-audit --no-fund
+
+      - name: Deploy Worker and frontend
+        working-directory: serverless
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
