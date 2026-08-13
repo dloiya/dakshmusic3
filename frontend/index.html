@@ -88,6 +88,28 @@ body{
 .menu li .dot{width:6px;height:6px;border-radius:50%;flex:none}
 .dot.ready{background:#3f9e4d}
 .dot.pending{background:#c79a2b}
+.mini-player{display:flex;align-items:center;gap:8px;padding:7px 9px;width:100%}
+.mini-player .mini-art{
+  width:32px;height:32px;border-radius:4px;flex:none;overflow:hidden;
+  background:linear-gradient(135deg,#7d92a8,#3d4f63);display:flex;align-items:center;justify-content:center;
+}
+.mini-player .mini-art img{width:100%;height:100%;object-fit:cover}
+.mini-player .mini-art svg{width:15px;height:15px;color:#fff;opacity:.8}
+.mini-player .mini-info{flex:1;min-width:0}
+.mini-player .mini-title{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini-player .mini-sub{font-size:10px;color:var(--screen-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.menu li.sel .mini-sub{color:#dbe6f5}
+.mini-player .mini-state{font-size:9.5px;color:var(--screen-sub);flex:none}
+.menu li.sel .mini-state{color:#dbe6f5}
+.up-next-label{font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--screen-sub);padding:5px 9px 2px;text-transform:uppercase}
+.row-actions{display:flex;gap:4px;flex:none}
+.row-actions button{
+  border:none;background:rgba(0,0,0,.06);color:var(--screen-ink);border-radius:4px;
+  width:20px;height:20px;font-size:11px;line-height:1;padding:0;cursor:pointer;flex:none;
+}
+.menu li.sel .row-actions button{background:rgba(255,255,255,.25);color:#fff}
+.row-actions button.remove{color:var(--danger)}
+.menu li.sel .row-actions button.remove{color:#ffd9d3}
 .empty{
   height:100%;display:flex;align-items:center;justify-content:center;
   text-align:center;font-size:12px;color:var(--screen-sub);padding:20px;line-height:1.5;
@@ -192,12 +214,13 @@ body{
 
       <!-- views injected/managed by JS -->
       <div class="view" id="view-home"><ul class="menu" id="list-home"></ul></div>
-      <div class="view" id="view-music"><ul class="menu" id="list-music"></ul></div>
-      <div class="view" id="view-extras"><ul class="menu" id="list-extras"></ul></div>
       <div class="view" id="view-settings"><ul class="menu" id="list-settings"></ul></div>
       <div class="view" id="view-playlist"><ul class="menu" id="list-playlist"></ul></div>
       <div class="view" id="view-top100"><ul class="menu" id="list-top100"></ul></div>
       <div class="view" id="view-searchresults"><ul class="menu" id="list-searchresults"></ul></div>
+      <div class="view" id="view-albumresults"><ul class="menu" id="list-albumresults"></ul></div>
+      <div class="view" id="view-albumdetail"><ul class="menu" id="list-albumdetail"></ul></div>
+      <div class="view" id="view-queue"><ul class="menu" id="list-queue"></ul></div>
 
       <div class="view" id="view-search">
         <div class="field-screen">
@@ -205,6 +228,15 @@ body{
           <input id="searchInput" placeholder="Song, artist, album" autocomplete="off">
           <div class="go" id="searchGo">Search</div>
           <div class="status" id="searchStatus"></div>
+        </div>
+      </div>
+
+      <div class="view" id="view-albums">
+        <div class="field-screen">
+          <label>Albums</label>
+          <input id="albumInput" placeholder="Album or artist name" autocomplete="off">
+          <div class="go" id="albumGo">Search</div>
+          <div class="status" id="albumStatus"></div>
         </div>
       </div>
 

@@ -218,6 +218,68 @@ async function playlistMutation(env, req, entryId) {
   return json({ ok: true, position: target });
 }
 
+async function albumSearch(env, req) {
+  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+  const url = new URL(req.url);
+  const q = url.searchParams.get("q");
+  if (!q) return json({ error: "q is required" }, 400);
+  const dz = new URL("https://api.deezer.com/search/album");
+  dz.searchParams.set("q", q);
+  dz.searchParams.set("limit", "25");
+  const response = await fetch(dz);
+  if (!response.ok) return json({ error: `Deezer HTTP ${response.status}` }, 502);
+  const data = await response.json();
+  return json({
+    items: (data.data || []).map(x => ({
+      album_id: String(x.id),
+      title: x.title,
+      artist: x.artist?.name || null,
+      artwork_url: x.cover_xl || x.cover_big || x.cover_medium || null,
+      tracks_count: x.nb_tracks || null,
+    })),
+  });
+}
+
+async function albumDetail(env, req, albumId) {
+  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+  const response = await fetch(`https://api.deezer.com/album/${encodeURIComponent(albumId)}`);
+  if (!response.ok) return json({ error: `Deezer HTTP ${response.status}` }, 502);
+  const data = await response.json();
+  if (data.error) return json({ error: data.error.message || "Album not found" }, 404);
+  const artwork = data.cover_xl || data.cover_big || data.cover_medium || null;
+  return json({
+    album_id: String(data.id),
+    title: data.title,
+    artist: data.artist?.name || null,
+    artwork_url: artwork,
+    tracks: (data.tracks?.data || []).map(x => ({
+      source: "deezer",
+      source_id: String(x.id),
+      source_url: x.link,
+      title: x.title,
+      artist: x.artist?.name || data.artist?.name || null,
+      album: data.title,
+      album_id: String(data.id),
+      duration_ms: (x.duration || 0) * 1000,
+      artwork_url: artwork,
+    })),
+  });
+}
+
+async function acquireTrack(env, req, trackId) {
+  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
+  const id = Number(trackId);
+  const cached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(id).first();
+  if (cached?.drive_file_id) return json({ cached: true });
+  try {
+    const jobId = await dispatchWarm(env, id);
+    if (!jobId) return json({ error: "Track has no source URL to acquire from" }, 400);
+    return json({ cached: false, job_id: jobId });
+  } catch (e) {
+    return json({ error: String(e?.message || e) }, 502);
+  }
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -227,6 +289,14 @@ export default {
     if (audioUploadMatch && (req.method === "PUT" || req.method === "POST")) return uploadAudio(env, req, audioUploadMatch[1]);
 
     if (path === "/api/v1/apple-music/import" && req.method === "POST") return appleImport(env, req, ctx);
+
+    if (path === "/api/v1/albums/search" && req.method === "GET") return albumSearch(env, req);
+
+    const albumMatch = path.match(/^\/api\/v1\/albums\/([^/]+)$/);
+    if (albumMatch && req.method === "GET") return albumDetail(env, req, albumMatch[1]);
+
+    const acquireMatch = path.match(/^\/api\/v1\/tracks\/([0-9]+)\/acquire$/);
+    if (acquireMatch && req.method === "POST") return acquireTrack(env, req, acquireMatch[1]);
 
     if (path === "/api/v1/playlist" && req.method === "POST") {
       if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
