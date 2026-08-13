@@ -18,6 +18,9 @@ on:
       album:
         required: false
         type: string
+      duration_ms:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -47,6 +50,7 @@ jobs:
           AUDIO_TITLE: ${{ inputs.title }}
           AUDIO_ARTIST: ${{ inputs.artist }}
           AUDIO_ALBUM: ${{ inputs.album }}
+          AUDIO_DURATION_MS: ${{ inputs.duration_ms }}
           AUDIO_OUTPUT: /tmp/output.flac
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -66,30 +70,27 @@ jobs:
             echo "=================================================="
             echo "Acquisition worker attempt $attempt/$MAX_ATTEMPTS"
             echo "Requested: $AUDIO_TITLE — $AUDIO_ARTIST"
+            echo "Expected duration: ${AUDIO_DURATION_MS}ms"
             echo "=================================================="
 
             rm -f /tmp/output.flac
 
-            # First try the primary provider.
             if providers/primary.sh && test -s /tmp/output.flac; then
-              echo "Primary provider produced audio; validating metadata..."
+              echo "Primary provider produced audio; validating recording identity..."
               if verify; then
                 echo "provider=primary" >> "$GITHUB_OUTPUT"
                 success=1
                 break
               fi
               echo "VALIDATION FAILED: primary provider returned the wrong recording."
-              echo "Discarding the file and continuing to the fallback provider."
               rm -f /tmp/output.flac
             else
               echo "Primary provider failed; continuing to fallback provider."
               rm -f /tmp/output.flac
             fi
 
-            # Fallback provider is also validated. A bad fallback result is
-            # discarded and the entire acquisition worker is retried.
             if providers/fallback.sh && test -s /tmp/output.flac; then
-              echo "Fallback provider produced audio; validating metadata..."
+              echo "Fallback provider produced audio; validating recording identity..."
               if verify; then
                 echo "provider=fallback" >> "$GITHUB_OUTPUT"
                 success=1
