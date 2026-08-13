@@ -24,7 +24,7 @@ jobs:
 
       - name: Patch acquisition identity resolver
         run: |
-          python3 -c 'from pathlib import Path; p=Path(".github/scripts/patch_acquisition_identity.py"); s=p.read_text(); s=s.replace("s2, count = pattern.subn(replacement + \\\"\\n\\n\\\", s, count=1)", "s2, count = pattern.subn(lambda _match: replacement + \\\"\\n\\n\\\", s, count=1)"); p.write_text(s)'
+          sed -i '139s/.*/s2, count = pattern.subn(lambda _match: replacement + "\\n\\n", s, count=1)/' .github/scripts/patch_acquisition_identity.py
           python3 .github/scripts/patch_acquisition_identity.py
 
       - name: Verify Apple duration resolution is present
@@ -57,23 +57,15 @@ jobs:
           set -euo pipefail
           echo '--- D1 migration history before reconciliation ---'
           npx wrangler d1 migrations list dakshmusic3 --remote
-
           echo '--- Production schema ---'
           npx wrangler d1 execute dakshmusic3 --remote --command "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','index') ORDER BY type,name;"
-
           echo '--- Reconcile migrations whose schema changes already exist ---'
           npx wrangler d1 execute dakshmusic3 --remote --command "
-            INSERT OR IGNORE INTO d1_migrations(name) SELECT '002_add_track_isrc.sql'
-              WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'isrc');
-            INSERT OR IGNORE INTO d1_migrations(name) SELECT '002_track_natural_key.sql'
-              WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'natural_key');
-            INSERT OR IGNORE INTO d1_migrations(name) SELECT '003_track_natural_key.sql'
-              WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'natural_key');
-            INSERT OR IGNORE INTO d1_migrations(name) SELECT '005_reconcile_existing_schema.sql'
-              WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'isrc')
-                AND EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'natural_key');
+            INSERT OR IGNORE INTO d1_migrations(name) SELECT '002_add_track_isrc.sql' WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'isrc');
+            INSERT OR IGNORE INTO d1_migrations(name) SELECT '002_track_natural_key.sql' WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'natural_key');
+            INSERT OR IGNORE INTO d1_migrations(name) SELECT '003_track_natural_key.sql' WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'natural_key');
+            INSERT OR IGNORE INTO d1_migrations(name) SELECT '005_reconcile_existing_schema.sql' WHERE EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'isrc') AND EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'natural_key');
           "
-
           echo '--- D1 migration history after reconciliation ---'
           npx wrangler d1 migrations list dakshmusic3 --remote
 
