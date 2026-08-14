@@ -10,6 +10,12 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
   headers: { "content-type": "application/json; charset=utf-8" },
 });
 
+async function runMetadataBackfill(env) {
+  const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 6 });
+  console.log("Scheduled metadata backfill", result);
+  return result;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -27,7 +33,7 @@ export default {
       const session = await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`)
         .bind(await cryptoHash(token), Math.floor(Date.now() / 1000)).first();
       if (!session) return json({ error: "Authentication required" }, 401);
-      const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 4 });
+      const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 6 });
       const { results = [] } = await env.DB.prepare(`
         SELECT COUNT(*) AS count FROM tracks
         WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''
@@ -47,15 +53,22 @@ export default {
     if (handled) return handled;
     return entry.fetch(request, env, ctx);
   },
+
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(libraryScheduled(env));
-    ctx.waitUntil((async () => {
-      try {
-        const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 4 });
-        if (result.checked > 0) console.log("Scheduled metadata backfill", result);
-      } catch (error) {
-        console.error("Scheduled metadata backfill failed", error?.stack || error);
-      }
-    })());
+    console.log("Cron metadata backfill fired", controller.cron, controller.scheduledTime);
+
+    // Await the metadata job itself. Cron invocations wait for the returned promise;
+    // relying only on waitUntil made failures invisible and made the job look idle.
+    try {
+      await runMetadataBackfill(env);
+    } catch (error) {
+      console.error("Scheduled metadata backfill failed", error?.stack || error);
+      throw error;
+    }
+
+    // Cache warming is independent and may continue in the background.
+    ctx.waitUntil(Promise.resolve().then(() => libraryScheduled(env)).catch(error => {
+      console.error("Scheduled cache warm failed", error?.stack || error);
+    }));
   },
 };
