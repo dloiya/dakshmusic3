@@ -2,10 +2,6 @@ function normIsrc(value) {
   return String(value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 function deezerMeta(data, method) {
   if (!data?.id || data?.error) return null;
   return {
@@ -18,21 +14,16 @@ function deezerMeta(data, method) {
 async function deezerIsrc(isrc) {
   const code = normIsrc(isrc);
   if (!code) return null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const response = await fetch(`https://api.deezer.com/track/isrc:${encodeURIComponent(code)}`, {
-        headers: { "accept": "application/json" },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        const meta = deezerMeta(data, "deezer_isrc");
-        if (meta) return meta;
-      }
-      if (response.status !== 429 && response.status < 500) return null;
-    } catch (_) {}
-    await sleep(500 * (attempt + 1));
+  try {
+    const response = await fetch(`https://api.deezer.com/track/isrc:${encodeURIComponent(code)}`, {
+      headers: { "accept": "application/json" },
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return deezerMeta(data, "deezer_isrc");
+  } catch (_) {
+    return null;
   }
-  return null;
 }
 
 async function musicBrainzIsrc(isrc) {
@@ -48,22 +39,10 @@ async function musicBrainzIsrc(isrc) {
       (r.isrcs || []).some(x => normIsrc(x) === code)
     );
     if (!recordings.length) return null;
-
-    const recording = recordings.find(r => r.length) || recordings[0];
-    let artwork_url = null;
-    const release = (recording.releases || []).find(r => r.id);
-    if (release?.id) {
-      try {
-        const cover = await fetch(`https://coverartarchive.org/release/${release.id}/front-500`);
-        if (cover.ok || cover.status >= 300 && cover.status < 400) {
-          artwork_url = cover.url || `https://coverartarchive.org/release/${release.id}/front-500`;
-        }
-      } catch (_) {}
-    }
-
+    const recording = recordings.find(r => Number(r.length) > 0) || recordings[0];
     return {
       duration_ms: Number(recording.length) > 0 ? Number(recording.length) : null,
-      artwork_url,
+      artwork_url: null,
       method: "musicbrainz_isrc",
     };
   } catch (_) {
@@ -72,8 +51,8 @@ async function musicBrainzIsrc(isrc) {
 }
 
 export async function backfillMissingMetadata(env, options = {}) {
-  const limit = Math.max(1, Math.min(Number(options.limit) || 500, 2000));
-  const concurrency = Math.max(1, Math.min(Number(options.concurrency) || 4, 8));
+  const limit = Math.max(1, Math.min(Number(options.limit) || 20, 20));
+  const concurrency = Math.max(1, Math.min(Number(options.concurrency) || 4, 4));
   const { results = [] } = await env.DB.prepare(`
     SELECT id, source, source_id, title, artist, album, isrc, duration_ms, artwork_url
     FROM tracks
