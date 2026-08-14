@@ -57,14 +57,36 @@ async function resolveMissingDuration(env, track) {
   let duration = null;
 
   try {
-    if (source === "apple" && track.source_id) {
-      const catalogId = String(track.source_id).replace(/^apple[-_:]/i, "");
-      if (/^\d+$/.test(catalogId)) {
-        const response = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(catalogId)}&entity=song`);
+    if (source === "apple") {
+      // Accept numeric IDs, apple-123/apple:123 IDs, and Apple Music URLs.
+      let appleId = String(track.source_id || "").trim().match(/(?:^apple[-_:])?(\d+)$/i)?.[1] || null;
+      if (!appleId && track.source_url) {
+        appleId = String(track.source_url).match(/\/song\/[^/?#]+\/(\d+)(?:\?|#|$)/i)?.[1] || null;
+      }
+
+      if (appleId) {
+        const response = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song`);
         if (response.ok) {
           const data = await response.json();
           const song = (data.results || []).find(item => item.wrapperType === "track" && Number(item.trackTimeMillis) > 0);
           duration = Number(song?.trackTimeMillis) || null;
+        }
+      }
+
+      // Fall back to exact Apple catalog metadata if an imported row has no usable ID.
+      if (!duration && track.title && track.artist) {
+        const term = encodeURIComponent(`${track.title} ${track.artist}`);
+        const response = await fetch(`https://itunes.apple.com/search?term=${term}&entity=song&limit=25`);
+        if (response.ok) {
+          const data = await response.json();
+          const wantedTitle = String(track.title).toLowerCase().trim();
+          const wantedArtist = String(track.artist).toLowerCase().trim();
+          const results = (data.results || []).filter(item => Number(item.trackTimeMillis) > 0);
+          const exact = results.find(item =>
+            String(item.trackName || "").toLowerCase().trim() === wantedTitle &&
+            String(item.artistName || "").toLowerCase().trim() === wantedArtist
+          );
+          if (exact) duration = Number(exact.trackTimeMillis);
         }
       }
     }
