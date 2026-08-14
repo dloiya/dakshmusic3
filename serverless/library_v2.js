@@ -14,11 +14,19 @@ async function dispatchWarm(env, trackId) {
   const id = crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,?,'queued')`).bind(id, trackId, "general").run();
   const r = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/acquire-audio.yml/dispatches`, { method:"POST", headers:{Accept:"application/vnd.github+json",Authorization:`Bearer ${env.GITHUB_TOKEN}`,"X-GitHub-Api-Version":"2026-03-10","User-Agent":"dakshmusic3","Content-Type":"application/json"}, body:JSON.stringify({ref:"main",inputs:{job_id:id,source_url:track.source_url,title:track.title,artist:track.artist||"",album:track.album||"",duration_ms:String(track.duration_ms)}}) });
-  if (!r.ok) { const text=await r.text(); await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(text,id).run(); return null; }
+  if (!r.ok) { const text=await r.text(); await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`GitHub dispatch ${r.status}: ${text}`,id).run(); return null; }
   await env.DB.prepare(`UPDATE download_jobs SET status='dispatched',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run(); return id;
 }
 
 function norm(s) { return String(s || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/gi, " ").trim().toLowerCase(); }
+function artistParts(s) { return norm(s).split(" ").filter(Boolean); }
+function artistMatches(candidate, wanted) {
+  const w=norm(wanted); if(!w)return false;
+  const names=[candidate?.artist?.name,...(candidate?.contributors||[]).map(x=>x?.name)].filter(Boolean).map(norm);
+  if(names.some(n=>n===w))return true;
+  const wantedParts=w.split(" ").filter(Boolean);
+  return names.some(n=>wantedParts.length>0 && wantedParts.every(p=>n.includes(p)));
+}
 function sameText(a,b) { return norm(a) === norm(b); }
 function deezerMeta(d, method) { return d?.id ? { id:d.id, duration_ms:Number(d.duration)>0?Number(d.duration)*1000:null, artwork_url:d.album?.cover_xl||d.album?.cover_big||d.album?.cover_medium||d.album?.cover||null, method } : null; }
 
@@ -33,15 +41,25 @@ async function deezerMetadataByTrackId(trackId) {
 }
 
 async function deezerMetadataBySearch(title, artist, album) {
-  const q=`track:"${String(title||"").replace(/"/g,"")}" artist:"${String(artist||"").replace(/"/g,"")}"`;
+  const cleanTitle=String(title||"").replace(/"/g,"").trim();
+  const queries=[`track:"${cleanTitle}"`,cleanTitle].filter(Boolean);
   try {
-    const r=await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=10`); if(!r.ok)return null;
-    const d=await r.json(); const candidates=(d.data||[]).filter(x=>sameText(x.title,title)&&sameText(x.artist?.name,artist));
-    if(!candidates.length)return null;
-    const exactAlbum=candidates.filter(x=>album && sameText(x.album?.title,album));
-    const pool=exactAlbum.length?exactAlbum:candidates;
-    if(pool.length!==1)return null;
-    return deezerMeta(pool[0],"title_artist" + (exactAlbum.length?"_album":""));
+    let all=[];
+    for(const q of queries){
+      const r=await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=25`); if(!r.ok)continue;
+      const d=await r.json(); all.push(...(d.data||[]));
+    }
+    const seen=new Set(); const candidates=all.filter(x=>x?.id&&!seen.has(x.id)&&seen.add(x.id));
+    const titleExact=candidates.filter(x=>sameText(x.title,title));
+    const artistExact=titleExact.filter(x=>artistMatches(x,artist));
+    if(!artistExact.length)return null;
+    const albumExact=album ? artistExact.filter(x=>sameText(x.album?.title,album)) : [];
+    const pool=albumExact.length?albumExact:artistExact;
+    if(pool.length===1)return deezerMeta(pool[0],albumExact.length?"title_artist_album":"title_artist");
+    // Prefer the candidate whose title/artist/album are all exact. Never use the first arbitrary result.
+    const ranked=pool.map(x=>({x,score:(sameText(x.title,title)?50:0)+(artistMatches(x,artist)?30:0)+(album&&sameText(x.album?.title,album)?20:0)})).sort((a,b)=>b.score-a.score);
+    if(ranked.length && ranked[0].score>=80 && (ranked.length===1 || ranked[0].score>ranked[1].score))return deezerMeta(ranked[0].x,"title_artist_ranked");
+    return null;
   } catch { return null; }
 }
 
@@ -54,17 +72,15 @@ async function backfillMetadata(env, tracks) {
       let meta=null;
       if(t.isrc) meta=await deezerMetadataByIsrc(t.isrc);
       if(meta) stats.by_isrc++;
-      // source_id is an Apple ID for Apple imports; never treat it as a Deezer ID.
       if(!meta && String(t.source||"").toLowerCase()==="deezer" && t.source_id){ meta=await deezerMetadataByTrackId(t.source_id); if(meta)stats.by_track_id++; }
       if(!meta) meta=await deezerMetadataBySearch(t.title,t.artist,t.album);
-      if(meta)stats.by_title_artist++;
+      if(meta && meta.method.startsWith("title_artist")) stats.by_title_artist++;
       return {t,meta};
     }));
     for(const {t,meta} of settled){
       if(!meta){stats.unresolved++;continue;}
       const duration=meta.duration_ms||null, artwork=meta.artwork_url||null;
       if(!duration&&!artwork){stats.unresolved++;continue;}
-      // ISRC is authoritative: repair previously incorrect metadata for an ISRC match.
       if(meta.method==="isrc") updates.push(env.DB.prepare(`UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(duration,artwork,t.id));
       else updates.push(env.DB.prepare(`UPDATE tracks SET duration_ms=COALESCE(duration_ms,?), artwork_url=COALESCE(artwork_url,?), updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(duration,artwork,t.id));
       stats.enriched++;
