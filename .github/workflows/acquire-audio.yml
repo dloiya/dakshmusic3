@@ -38,22 +38,62 @@ jobs:
 
       - name: Install runtime tools
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y ffmpeg curl python3 python3-pip
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r providers/requirements.txt
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Verify acquisition and library routing
         run: |
           set -euo pipefail
+          test -f providers/primary.sh
+          test -f providers/fallback.sh
+          test -f providers/validate_audio.py
+          test -f .github/scripts/upload_r2.py
           grep -q "handleLibraryRoute" serverless/app_v2.js
           grep -q "async function dispatchWarm" serverless/library.js
           grep -q "duration_ms" serverless/library.js
           grep -q "async function acquisitionStatus" serverless/library.js
           grep -q 'jobs/status' serverless/library.js
           grep -q '/jobs/status' frontend/playlist-ui.js
-          echo "Acquisition, duration guard, library routing, and UI verified"
-          
+          echo "Acquisition, validation, upload, library routing, and UI verified"
+
+      - name: Acquire lossless audio
+        id: acquire
+        env:
+          AUDIO_SOURCE_URL: ${{ inputs.source_url }}
+          AUDIO_TITLE: ${{ inputs.title }}
+          AUDIO_ARTIST: ${{ inputs.artist }}
+          AUDIO_ALBUM: ${{ inputs.album }}
+          AUDIO_DURATION_MS: ${{ inputs.duration_ms }}
+          AUDIO_OUTPUT: /tmp/output.flac
+        run: |
+          set -euo pipefail
+          rm -f /tmp/output.flac
+          echo "Attempting primary SpotiFLAC provider..."
+          if providers/primary.sh; then
+            echo "provider=spotiflac" >> "$GITHUB_OUTPUT"
+          else
+            echo "Primary provider failed; attempting YouTube fallback..."
+            rm -f /tmp/output.flac
+            providers/fallback.sh
+            echo "provider=ytflac" >> "$GITHUB_OUTPUT"
+          fi
+          test -s /tmp/output.flac
+
+      - name: Validate downloaded audio identity
+        env:
+          AUDIO_SOURCE_URL: ${{ inputs.source_url }}
+          AUDIO_TITLE: ${{ inputs.title }}
+          AUDIO_ARTIST: ${{ inputs.artist }}
+          AUDIO_ALBUM: ${{ inputs.album }}
+          AUDIO_DURATION_MS: ${{ inputs.duration_ms }}
+        run: |
+          set -euo pipefail
+          python3 providers/validate_audio.py /tmp/output.flac
+
       - name: Upload to R2 and complete job
         env:
           JOB_ID: ${{ inputs.job_id }}
@@ -61,6 +101,7 @@ jobs:
           WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
         run: |
+          set -euo pipefail
           python3 .github/scripts/upload_r2.py /tmp/output.flac
 
       - name: Report failure
@@ -70,6 +111,7 @@ jobs:
           WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
         run: |
+          set -euo pipefail
           curl -sS -X POST "$WORKER_BASE_URL/api/v1/jobs/callback" \
             -H "Content-Type: application/json" \
             -H "X-Callback-Secret: $CALLBACK_SECRET" \
