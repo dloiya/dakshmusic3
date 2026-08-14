@@ -1,6 +1,7 @@
 import entry from "./entry.js";
 import { handleLibraryRoute } from "./library.js";
 import { handleLibraryV2, scheduled as libraryScheduled } from "./library_v2.js";
+import { handleLibraryV3 } from "./library_v3.js";
 import { handleAcquisitionV3 } from "./acquisition_v3.js";
 import { backfillMissingMetadata } from "./metadata_backfill.js";
 
@@ -26,14 +27,19 @@ export default {
       const session = await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`)
         .bind(await cryptoHash(token), Math.floor(Date.now() / 1000)).first();
       if (!session) return json({ error: "Authentication required" }, 401);
-      const result = await backfillMissingMetadata(env, { limit: 500, concurrency: 4 });
-      return json({ ok: true, metadata_backfill: result });
+      const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 4 });
+      const { results = [] } = await env.DB.prepare(`
+        SELECT COUNT(*) AS count FROM tracks
+        WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''
+      `).all();
+      return json({ ok: true, metadata_backfill: { ...result, remaining: Number(results[0]?.count || 0), batch_limit: 20 } });
     }
 
-    // Keep acquisition ahead of the legacy worker route so Apple imports with
-    // missing duration_ms are resolved from the catalog before dispatch.
     const acquisition = await handleAcquisitionV3(request, env);
     if (acquisition) return acquisition;
+
+    const v3 = await handleLibraryV3(request, env);
+    if (v3) return v3;
 
     const v2 = await handleLibraryV2(request, env, ctx);
     if (v2) return v2;
