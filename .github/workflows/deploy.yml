@@ -12,7 +12,6 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,16 +21,23 @@ jobs:
         with:
           node-version: 22
 
+      - name: Enrich seed metadata logic
+        run: |
+          set -euo pipefail
+          python3 scripts/enrich_seed_metadata.py
+
       - name: Verify acquisition and library routing
         run: |
           set -euo pipefail
           grep -q "handleLibraryRoute" serverless/app_v2.js
           grep -q "async function dispatchWarm" serverless/library.js
+          grep -q "async function enrichSeedTrackMetadata" serverless/library.js
           grep -q "duration_ms" serverless/library.js
+          grep -q "artwork_url" serverless/library.js
           grep -q "async function acquisitionStatus" serverless/library.js
           grep -q 'jobs/status' serverless/library.js
           grep -q '/jobs/status' frontend/playlist-ui.js
-          echo "Acquisition, duration, library routing, and UI verified"
+          echo "Acquisition, seed metadata, duration, library routing, and UI verified"
 
       - name: Install Wrangler
         working-directory: serverless
