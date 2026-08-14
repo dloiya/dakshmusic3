@@ -73,12 +73,12 @@ jobs:
           set -euo pipefail
           rm -f /tmp/output.flac
           echo "Attempting primary SpotiFLAC provider..."
-          if providers/primary.sh; then
+          if bash providers/primary.sh; then
             echo "provider=spotiflac" >> "$GITHUB_OUTPUT"
           else
             echo "Primary provider failed; attempting YouTube fallback..."
             rm -f /tmp/output.flac
-            providers/fallback.sh
+            bash providers/fallback.sh
             echo "provider=ytflac" >> "$GITHUB_OUTPUT"
           fi
           test -s /tmp/output.flac
