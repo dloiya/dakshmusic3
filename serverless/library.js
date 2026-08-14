@@ -58,12 +58,10 @@ async function resolveMissingDuration(env, track) {
 
   try {
     if (source === "apple") {
-      // Accept numeric IDs, apple-123/apple:123 IDs, and Apple Music URLs.
       let appleId = String(track.source_id || "").trim().match(/(?:^apple[-_:])?(\d+)$/i)?.[1] || null;
       if (!appleId && track.source_url) {
         appleId = String(track.source_url).match(/\/song\/[^/?#]+\/(\d+)(?:\?|#|$)/i)?.[1] || null;
       }
-
       if (appleId) {
         const response = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song`);
         if (response.ok) {
@@ -72,8 +70,6 @@ async function resolveMissingDuration(env, track) {
           duration = Number(song?.trackTimeMillis) || null;
         }
       }
-
-      // Fall back to exact Apple catalog metadata if an imported row has no usable ID.
       if (!duration && track.title && track.artist) {
         const term = encodeURIComponent(`${track.title} ${track.artist}`);
         const response = await fetch(`https://itunes.apple.com/search?term=${term}&entity=song&limit=25`);
@@ -82,15 +78,11 @@ async function resolveMissingDuration(env, track) {
           const wantedTitle = String(track.title).toLowerCase().trim();
           const wantedArtist = String(track.artist).toLowerCase().trim();
           const results = (data.results || []).filter(item => Number(item.trackTimeMillis) > 0);
-          const exact = results.find(item =>
-            String(item.trackName || "").toLowerCase().trim() === wantedTitle &&
-            String(item.artistName || "").toLowerCase().trim() === wantedArtist
-          );
+          const exact = results.find(item => String(item.trackName || "").toLowerCase().trim() === wantedTitle && String(item.artistName || "").toLowerCase().trim() === wantedArtist);
           if (exact) duration = Number(exact.trackTimeMillis);
         }
       }
     }
-
     if (!duration && source === "deezer" && track.source_id) {
       const response = await fetch(`https://api.deezer.com/track/${encodeURIComponent(track.source_id)}`);
       if (response.ok) {
@@ -98,7 +90,6 @@ async function resolveMissingDuration(env, track) {
         if (Number(data?.duration) > 0) duration = Number(data.duration) * 1000;
       }
     }
-
     if (!duration && track.source_url) {
       const match = String(track.source_url).match(/deezer\.com\/(?:[a-z]{2}\/)?track\/(\d+)/i);
       if (match) {
@@ -109,7 +100,6 @@ async function resolveMissingDuration(env, track) {
         }
       }
     }
-
     if (!duration && track.title && track.artist) {
       const query = encodeURIComponent(`track:"${track.title}" artist:"${track.artist}"`);
       const response = await fetch(`https://api.deezer.com/search?q=${query}&limit=5`);
@@ -117,11 +107,7 @@ async function resolveMissingDuration(env, track) {
         const data = await response.json();
         const wantedTitle = String(track.title).toLowerCase().trim();
         const wantedArtist = String(track.artist).toLowerCase().trim();
-        const hit = (data.data || []).find(item =>
-          String(item.title || "").toLowerCase().trim() === wantedTitle &&
-          String(item.artist?.name || "").toLowerCase().trim() === wantedArtist &&
-          Number(item.duration) > 0
-        );
+        const hit = (data.data || []).find(item => String(item.title || "").toLowerCase().trim() === wantedTitle && String(item.artist?.name || "").toLowerCase().trim() === wantedArtist && Number(item.duration) > 0);
         if (hit) duration = Number(hit.duration) * 1000;
       }
     }
@@ -130,37 +116,38 @@ async function resolveMissingDuration(env, track) {
   }
 
   if (duration) {
-    await env.DB.prepare(`UPDATE tracks SET duration_ms=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`)
-      .bind(duration, track.id).run();
+    await env.DB.prepare(`UPDATE tracks SET duration_ms=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND (duration_ms IS NULL OR duration_ms=0)`).bind(duration, track.id).run();
     track.duration_ms = duration;
   }
-
   return track;
 }
 
 async function dispatchWarm(env, trackId) {
   const existing = await env.DB.prepare(`SELECT id, created_at FROM download_jobs WHERE track_id=? AND status IN ('queued','dispatched','running') ORDER BY created_at DESC LIMIT 1`).bind(trackId).first();
   if (existing) return existing.id;
-
   let track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(trackId).first();
-  if (!track?.source_url || !env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) return null;
-
+  if (!track?.source_url) throw new Error("Track has no source URL to acquire from");
+  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPO) throw new Error("GitHub Actions dispatch is not configured");
   track = await resolveMissingDuration(env, track);
-
-  if (!track.duration_ms) {
-    throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);
-  }
+  if (!track.duration_ms) throw new Error(`Track ${track.natural_key || trackId} has no canonical duration_ms; refusing acquisition without identity data`);
 
   const id = crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO download_jobs(id,track_id,kind,status) VALUES(?,?,?,'queued')`).bind(id, trackId, "general").run();
   const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/acquire-audio.yml/dispatches`, {
-    method: "POST", headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${env.GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "personal-music-server", "Content-Type": "application/json" },
+    method: "POST",
+    headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${env.GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "personal-music-server", "Content-Type": "application/json" },
     body: JSON.stringify({ ref: "main", inputs: { job_id: id, source_url: track.source_url, title: track.title, artist: track.artist || "", album: track.album || "", duration_ms: String(track.duration_ms) } }),
   });
   if (!response.ok) {
-    const text = await response.text();
-    await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(text, id).run();
-    return null;
+    const responseBody = await response.text();
+    let githubError = responseBody;
+    try {
+      const parsed = JSON.parse(responseBody);
+      githubError = parsed.message || parsed.error || responseBody;
+    } catch {}
+    const detail = `GitHub Actions dispatch failed (${response.status} ${response.statusText || ""}): ${githubError}`.trim();
+    await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(detail, id).run();
+    throw new Error(detail);
   }
   await env.DB.prepare(`UPDATE download_jobs SET status='dispatched',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run();
   return id;
@@ -168,23 +155,20 @@ async function dispatchWarm(env, trackId) {
 
 async function acquireTrack(env, req, trackId) {
   if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-
   const id = Number(trackId);
   if (!Number.isInteger(id) || id <= 0) return json({ error: "Invalid track ID" }, 400);
-
   const track = await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(id).first();
   if (!track) return json({ error: "Track not found" }, 404);
   if (!track.source_url) return json({ error: "Track has no source URL to acquire from" }, 400);
-
   const cached = await env.DB.prepare(`SELECT drive_file_id FROM general_cache WHERE track_id=?`).bind(id).first();
   if (cached?.drive_file_id) return json({ cached: true, track_id: id, drive_file_id: cached.drive_file_id });
-
   try {
     const jobId = await dispatchWarm(env, id);
-    if (!jobId) return json({ error: "Unable to create acquisition job" }, 502);
     return json({ cached: false, track_id: id, job_id: jobId });
   } catch (error) {
-    return json({ error: String(error?.message || error) }, 502);
+    const message = String(error?.message || error);
+    const githubMatch = message.match(/^GitHub Actions dispatch failed \((\d+)/);
+    return json({ error: message, github_status: githubMatch ? Number(githubMatch[1]) : null, track_id: id }, githubMatch ? 502 : 502);
   }
 }
 
@@ -233,13 +217,7 @@ async function seedLibrary(env, req, ctx) {
 
 async function acquisitionStatus(env, req) {
   if (!(await requireAuth(env, req))) return json({ error: "Unauthorized" }, 401);
-  const { results = [] } = await env.DB.prepare(`
-    SELECT j.id, j.status, j.error, j.created_at, j.updated_at,
-           t.id AS track_id, t.title, t.artist, t.album
-    FROM download_jobs j JOIN tracks t ON t.id=j.track_id
-    ORDER BY CASE WHEN j.status IN ('queued','dispatched','running') THEN 0 ELSE 1 END, COALESCE(j.updated_at,j.created_at) DESC
-    LIMIT 100
-  `).all();
+  const { results = [] } = await env.DB.prepare(`SELECT j.id, j.status, j.error, j.created_at, j.updated_at, t.id AS track_id, t.title, t.artist, t.album FROM download_jobs j JOIN tracks t ON t.id=j.track_id ORDER BY CASE WHEN j.status IN ('queued','dispatched','running') THEN 0 ELSE 1 END, COALESCE(j.updated_at,j.created_at) DESC LIMIT 100`).all();
   return json({ jobs: results });
 }
 
