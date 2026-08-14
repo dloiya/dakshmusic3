@@ -123,6 +123,28 @@ async function seed(env, req, ctx) {
   return json({ ok: true, playlist_entries: ordered.length, cache_entries: topTracks.length, cache_limit: 200, top100: topTracks.map((t, i) => ({ rank: i + 1, track_id: t.id, title: t.title, artist: t.artist, play_count: 0 })), missing_count: items.length - ordered.length, play_counts_reset: true });
 }
 
+async function clearAll(env, req) {
+  if (!(await auth(env, req))) return json({ error: "Authentication required" }, 401);
+  try {
+    // Preserve users/sessions and schema. Clear only user library/catalog,
+    // playlist, album state, cache metadata, and acquisition jobs.
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM album_cache`),
+      env.DB.prepare(`DELETE FROM album_sessions`),
+      env.DB.prepare(`DELETE FROM general_cache`),
+      env.DB.prepare(`DELETE FROM top_played_cache`),
+      env.DB.prepare(`DELETE FROM download_jobs`),
+      env.DB.prepare(`DELETE FROM playlist_entries`),
+      env.DB.prepare(`DELETE FROM tracks`),
+      env.DB.prepare(`DELETE FROM albums`),
+    ]);
+    return json({ ok: true, cleared: ["tracks", "playlist_entries", "top_played_cache", "general_cache", "download_jobs", "album_cache", "album_sessions", "albums"], preserved: ["sessions"] });
+  } catch (error) {
+    console.error("clear-all failed", error);
+    return json({ error: `Clear-all failed: ${error?.message || error}` }, 500);
+  }
+}
+
 async function warmTopCache(env) {
   const { results } = await env.DB.prepare(`SELECT t.id FROM top_played_cache c JOIN tracks t ON t.id=c.track_id WHERE c.storage_key IS NULL ORDER BY c.rank LIMIT 6`).all();
   for (const row of results || []) {
@@ -143,6 +165,7 @@ export async function scheduled(env) { await warmTopCache(env); }
 
 export async function handleLibraryV2(req, env, ctx) {
   const url = new URL(req.url);
+  if (url.pathname === "/api/v1/admin/clear-all" && req.method === "POST") return clearAll(env, req);
   if (url.pathname === "/api/v1/library/seed" && req.method === "POST") return seed(env, req, ctx);
   if (url.pathname === "/api/v1/jobs/status" && req.method === "GET") return acquisitionStatus(env, req);
   return null;
