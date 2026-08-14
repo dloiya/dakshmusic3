@@ -49,5 +49,13 @@ export default {
   },
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(libraryScheduled(env));
+    ctx.waitUntil((async () => {
+      try {
+        const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 4 });
+        if (result.checked > 0) console.log("Scheduled metadata backfill", result);
+      } catch (error) {
+        console.error("Scheduled metadata backfill failed", error?.stack || error);
+      }
+    })());
   },
 };
