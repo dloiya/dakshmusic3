@@ -21,8 +21,6 @@ async function requireAuth(env, req) {
   return !!row;
 }
 
-// Acquisition endpoints are intentionally kept in the entry router so the
-// frontend has one stable API regardless of which library worker is active.
 async function listAcquisitions(env, req) {
   if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
   const url = new URL(req.url);
@@ -31,9 +29,7 @@ async function listAcquisitions(env, req) {
   const sql = status
     ? `SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id WHERE j.status=? ORDER BY datetime(j.created_at) DESC LIMIT ?`
     : `SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id ORDER BY datetime(j.created_at) DESC LIMIT ?`;
-  const result = status
-    ? await env.DB.prepare(sql).bind(status, limit).all()
-    : await env.DB.prepare(sql).bind(limit).all();
+  const result = status ? await env.DB.prepare(sql).bind(status, limit).all() : await env.DB.prepare(sql).bind(limit).all();
   return json({ items: result.results || [], limit });
 }
 
@@ -45,12 +41,23 @@ async function acquisitionSummary(env, req) {
   return json({ counts, active: (counts.queued || 0) + (counts.dispatched || 0) + (counts.running || 0) });
 }
 
+async function withPlayerDetails(response) {
+  const type = response.headers.get("content-type") || "";
+  if (!type.includes("text/html")) return response;
+  const html = await response.text();
+  if (html.includes("player-details.js")) return new Response(html, response);
+  const patched = html.replace(/<\/body>/i, '<script src="/player-details.js"></script></body>');
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "text/html; charset=utf-8");
+  return new Response(patched, { status: response.status, statusText: response.statusText, headers });
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const path = url.pathname;
     if ((path === "/api/v1/acquisitions" || path === "/api/v1/jobs") && req.method === "GET") return listAcquisitions(env, req);
     if (path === "/api/v1/acquisitions/summary" && req.method === "GET") return acquisitionSummary(env, req);
-    return worker.fetch(req, env, ctx);
+    return withPlayerDetails(await worker.fetch(req, env, ctx));
   },
 };
