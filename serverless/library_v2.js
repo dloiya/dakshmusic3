@@ -34,11 +34,73 @@ async function dispatchWarm(env, trackId) {
   });
   if (!r.ok) {
     const text = await r.text();
-    await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(text, id).run();
+    await env.DB.prepare(`UPDATE download_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`GitHub dispatch ${r.status}: ${text || r.statusText}`, id).run();
     return null;
   }
   await env.DB.prepare(`UPDATE download_jobs SET status='dispatched',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run();
   return id;
+}
+
+function deezerArtwork(track) {
+  return track?.album?.cover_xl || track?.album?.cover_big || track?.album?.cover_medium || track?.album?.cover || null;
+}
+
+async function lookupDeezerMetadata(title, artist) {
+  const q = String(title || "").trim() && String(artist || "").trim()
+    ? `track:"${String(title).trim()}" artist:"${String(artist).trim()}"`
+    : String(title || artist || "").trim();
+  if (!q) return null;
+  try {
+    const r = await fetch(`https://api.deezer.com/search/track?q=${encodeURIComponent(q)}&limit=5`, {
+      headers: { "User-Agent": "dakshmusic3" },
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    const tracks = Array.isArray(data?.data) ? data.data : [];
+    const wantedTitle = String(title || "").trim().toLowerCase();
+    const wantedArtist = String(artist || "").trim().toLowerCase();
+    const exact = tracks.find(t =>
+      String(t?.title || "").trim().toLowerCase() === wantedTitle &&
+      String(t?.artist?.name || "").trim().toLowerCase() === wantedArtist
+    );
+    const t = exact || tracks[0];
+    if (!t) return null;
+    return {
+      duration_ms: Number(t.duration) > 0 ? Number(t.duration) * 1000 : null,
+      artwork_url: deezerArtwork(t),
+      deezer_id: t.id || null,
+    };
+  } catch (error) {
+    console.warn("Deezer metadata lookup failed", title, artist, error);
+    return null;
+  }
+}
+
+async function backfillMetadata(env) {
+  const { results = [] } = await env.DB.prepare(`
+    SELECT id,title,artist,duration_ms,artwork_url
+    FROM tracks
+    WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''
+    ORDER BY id
+  `).all();
+  if (!results.length) return { checked: 0, enriched: 0 };
+
+  let enriched = 0;
+  for (let offset = 0; offset < results.length; offset += 8) {
+    const chunk = results.slice(offset, offset + 8);
+    const resolved = await Promise.all(chunk.map(async track => ({ track, meta: await lookupDeezerMetadata(track.title, track.artist) })));
+    const updates = [];
+    for (const { track, meta } of resolved) {
+      if (!meta) continue;
+      const duration = track.duration_ms > 0 ? track.duration_ms : meta.duration_ms;
+      const artwork = track.artwork_url || meta.artwork_url;
+      if (!duration && !artwork) continue;
+      updates.push(env.DB.prepare(`UPDATE tracks SET duration_ms=COALESCE(NULLIF(duration_ms,0),?), artwork_url=COALESCE(NULLIF(artwork_url,''),?), updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(duration || null, artwork || null, track.id));
+      enriched++;
+    }
+    if (updates.length) await env.DB.batch(updates);
+  }
+  return { checked: results.length, enriched };
 }
 
 async function seed(env, req, ctx) {
@@ -52,17 +114,19 @@ async function seed(env, req, ctx) {
   await env.DB.prepare(`DELETE FROM playlist_entries`).run();
   await env.DB.prepare(`DELETE FROM top_played_cache`).run();
 
-  const rows = [];
   for (let offset = 0; offset < items.length; offset += 150) {
     const chunk = items.slice(offset, offset + 150);
-    const statements = chunk.map((x, i) => {
+    await env.DB.batch(chunk.map((x, i) => {
       const sourceId = x.source_id ? `apple:${String(x.source_id)}` : null;
       const sourceUrl = x.source_url || (x.source_id ? `https://music.apple.com/us/song/${slug(x.title)}/${String(x.source_id)}` : null);
       return env.DB.prepare(`INSERT OR IGNORE INTO tracks(source,source_id,source_url,title,artist,album,duration_ms,isrc,artwork_url,natural_key,play_count) VALUES('apple',?,?,?,?,?,?,?,?,?,0)`)
         .bind(sourceId, sourceUrl, x.title, x.artist || "", x.album || null, Number(x.duration_ms) || null, x.isrc || null, x.artwork_url || null, naturalKey(x, offset + i));
-    });
-    await env.DB.batch(statements);
+    }));
   }
+
+  // Metadata is catalog data only: enrich missing duration/artwork from Deezer.
+  // Failure to find metadata never blocks seeding.
+  const metadata = await backfillMetadata(env);
 
   const { results: sourceRows = [] } = await env.DB.prepare(`SELECT id,source_id,title FROM tracks WHERE source='apple' AND (source_url IS NULL OR source_url='') AND source_id IS NOT NULL`).all();
   if (sourceRows.length) {
@@ -120,14 +184,12 @@ async function seed(env, req, ctx) {
     await env.DB.batch(topTracks.map((t, i) => env.DB.prepare(`INSERT INTO top_played_cache(rank,track_id,storage_key,updated_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)`).bind(i + 1, t.id)));
   }
 
-  return json({ ok: true, playlist_entries: ordered.length, cache_entries: topTracks.length, cache_limit: 200, top100: topTracks.map((t, i) => ({ rank: i + 1, track_id: t.id, title: t.title, artist: t.artist, play_count: 0 })), missing_count: items.length - ordered.length, play_counts_reset: true });
+  return json({ ok: true, playlist_entries: ordered.length, cache_entries: topTracks.length, cache_limit: 200, top100: topTracks.map((t, i) => ({ rank: i + 1, track_id: t.id, title: t.title, artist: t.artist, play_count: 0 })), missing_count: items.length - ordered.length, play_counts_reset: true, metadata_backfill: metadata });
 }
 
 async function clearAll(env, req) {
   if (!(await auth(env, req))) return json({ error: "Authentication required" }, 401);
   try {
-    // Preserve users/sessions and schema. Clear only user library/catalog,
-    // playlist, album state, cache metadata, and acquisition jobs.
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM album_cache`),
       env.DB.prepare(`DELETE FROM album_sessions`),
