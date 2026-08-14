@@ -18,74 +18,59 @@ async function dispatchWarm(env, trackId) {
   await env.DB.prepare(`UPDATE download_jobs SET status='dispatched',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run(); return id;
 }
 
+function norm(s) { return String(s || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/gi, " ").trim().toLowerCase(); }
+function sameText(a,b) { return norm(a) === norm(b); }
+function deezerMeta(d, method) { return d?.id ? { id:d.id, duration_ms:Number(d.duration)>0?Number(d.duration)*1000:null, artwork_url:d.album?.cover_xl||d.album?.cover_big||d.album?.cover_medium||d.album?.cover||null, method } : null; }
+
 async function deezerMetadataByIsrc(isrc) {
-  const value = String(isrc || "").trim();
-  if (!value) return null;
-  try {
-    const r = await fetch(`https://api.deezer.com/track/isrc:${encodeURIComponent(value)}`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (!d?.id) return null;
-    return { id:d.id, duration_ms:Number(d.duration) > 0 ? Number(d.duration)*1000 : null, artwork_url:d.album?.cover_xl || d.album?.cover_big || d.album?.cover_medium || d.album?.cover || null, method:"isrc" };
-  } catch { return null; }
+  const value=String(isrc||"").replace(/[^A-Za-z0-9]/g, "").trim(); if(!value)return null;
+  try { const r=await fetch(`https://api.deezer.com/track/isrc:${encodeURIComponent(value)}`); if(!r.ok)return null; const d=await r.json(); return deezerMeta(d,"isrc"); } catch { return null; }
 }
 
 async function deezerMetadataByTrackId(trackId) {
-  const value = String(trackId || "").trim();
-  if (!value) return null;
-  try {
-    const r = await fetch(`https://api.deezer.com/track/${encodeURIComponent(value)}`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (!d?.id || d?.error) return null;
-    return { id:d.id, duration_ms:Number(d.duration) > 0 ? Number(d.duration)*1000 : null, artwork_url:d.album?.cover_xl || d.album?.cover_big || d.album?.cover_medium || d.album?.cover || null, method:"track_id" };
-  } catch { return null; }
+  const value=String(trackId||"").trim(); if(!value)return null;
+  try { const r=await fetch(`https://api.deezer.com/track/${encodeURIComponent(value)}`); if(!r.ok)return null; const d=await r.json(); return deezerMeta(d,"track_id"); } catch { return null; }
 }
 
-async function deezerMetadataBySearch(title, artist) {
-  const q = `track:"${String(title || "").replace(/"/g, "")}" artist:"${String(artist || "").replace(/"/g, "")}"`;
+async function deezerMetadataBySearch(title, artist, album) {
+  const q=`track:"${String(title||"").replace(/"/g,"")}" artist:"${String(artist||"").replace(/"/g,"")}"`;
   try {
-    const r = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=5`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    const wantedTitle=String(title||"").toLowerCase().trim(), wantedArtist=String(artist||"").toLowerCase().trim();
-    const match=(d.data||[]).find(x => String(x.title||"").toLowerCase().trim()===wantedTitle && String(x.artist?.name||"").toLowerCase().trim()===wantedArtist) || d.data?.[0];
-    if (!match?.id) return null;
-    return { id:match.id, duration_ms:Number(match.duration)>0?Number(match.duration)*1000:null, artwork_url:match.album?.cover_xl||match.album?.cover_big||match.album?.cover_medium||match.album?.cover||null, method:"title_artist" };
+    const r=await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=10`); if(!r.ok)return null;
+    const d=await r.json(); const candidates=(d.data||[]).filter(x=>sameText(x.title,title)&&sameText(x.artist?.name,artist));
+    if(!candidates.length)return null;
+    const exactAlbum=candidates.filter(x=>album && sameText(x.album?.title,album));
+    const pool=exactAlbum.length?exactAlbum:candidates;
+    if(pool.length!==1)return null;
+    return deezerMeta(pool[0],"title_artist" + (exactAlbum.length?"_album":""));
   } catch { return null; }
 }
 
 async function backfillMetadata(env, tracks) {
-  const stats={checked:tracks.length,by_isrc:0,by_track_id:0,by_title_artist:0,enriched:0,unresolved:0};
-  const results=[];
+  const stats={checked:tracks.length,by_isrc:0,by_track_id:0,by_title_artist:0,enriched:0,unresolved:0,ambiguous:0};
+  const updates=[];
   for(let offset=0;offset<tracks.length;offset+=8){
     const chunk=tracks.slice(offset,offset+8);
     const settled=await Promise.all(chunk.map(async t=>{
-      if(t.duration_ms && t.artwork_url) return {t,meta:null};
-      let meta=await deezerMetadataByIsrc(t.isrc);
-      if(meta) stats.by_isrc++; else {
-        const rawId=String(t.source_id||"").replace(/^apple:/i,"");
-        meta=await deezerMetadataByTrackId(rawId);
-        if(meta) stats.by_track_id++; else {
-          meta=await deezerMetadataBySearch(t.title,t.artist);
-          if(meta) stats.by_title_artist++;
-        }
-      }
+      let meta=null;
+      if(t.isrc) meta=await deezerMetadataByIsrc(t.isrc);
+      if(meta) stats.by_isrc++;
+      // source_id is an Apple ID for Apple imports; never treat it as a Deezer ID.
+      if(!meta && String(t.source||"").toLowerCase()==="deezer" && t.source_id){ meta=await deezerMetadataByTrackId(t.source_id); if(meta)stats.by_track_id++; }
+      if(!meta) meta=await deezerMetadataBySearch(t.title,t.artist,t.album);
+      if(meta)stats.by_title_artist++;
       return {t,meta};
     }));
-    results.push(...settled);
-  }
-  const updates=[];
-  for(const {t,meta} of results){
-    if(!meta){stats.unresolved++;continue;}
-    const duration=t.duration_ms||meta.duration_ms||null;
-    const artwork=t.artwork_url||meta.artwork_url||null;
-    if(duration || artwork){
-      updates.push(env.DB.prepare(`UPDATE tracks SET duration_ms=COALESCE(duration_ms,?), artwork_url=COALESCE(artwork_url,?), updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(duration,artwork,t.id));
+    for(const {t,meta} of settled){
+      if(!meta){stats.unresolved++;continue;}
+      const duration=meta.duration_ms||null, artwork=meta.artwork_url||null;
+      if(!duration&&!artwork){stats.unresolved++;continue;}
+      // ISRC is authoritative: repair previously incorrect metadata for an ISRC match.
+      if(meta.method==="isrc") updates.push(env.DB.prepare(`UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(duration,artwork,t.id));
+      else updates.push(env.DB.prepare(`UPDATE tracks SET duration_ms=COALESCE(duration_ms,?), artwork_url=COALESCE(artwork_url,?), updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(duration,artwork,t.id));
       stats.enriched++;
-    } else stats.unresolved++;
+    }
   }
-  for(let offset=0;offset<updates.length;offset+=100) await env.DB.batch(updates.slice(offset,offset+100));
+  for(let offset=0;offset<updates.length;offset+=100)await env.DB.batch(updates.slice(offset,offset+100));
   return stats;
 }
 
@@ -95,7 +80,7 @@ async function seed(env, req, ctx) {
   const items=Array.isArray(body?.items)?body.items.filter(x=>x?.title):[]; if(!items.length)return json({error:"No tracks supplied"},400);
   await env.DB.prepare(`UPDATE tracks SET play_count=0`).run(); await env.DB.prepare(`DELETE FROM playlist_entries`).run(); await env.DB.prepare(`DELETE FROM top_played_cache`).run();
   for(let offset=0;offset<items.length;offset+=150){const chunk=items.slice(offset,offset+150);await env.DB.batch(chunk.map((x,i)=>{const sourceId=x.source_id?`apple:${String(x.source_id)}`:null;const sourceUrl=x.source_url||(x.source_id?`https://music.apple.com/us/song/${slug(x.title)}/${String(x.source_id)}`:null);return env.DB.prepare(`INSERT OR IGNORE INTO tracks(source,source_id,source_url,title,artist,album,duration_ms,isrc,artwork_url,natural_key,play_count) VALUES('apple',?,?,?,?,?,?,?,?,?,0)`).bind(sourceId,sourceUrl,x.title,x.artist||"",x.album||null,Number(x.duration_ms)||null,x.isrc||null,x.artwork_url||null,naturalKey(x,offset+i));}));}
-  const {results:missing=[]}=await env.DB.prepare(`SELECT id,source_id,title,artist,isrc,duration_ms,artwork_url FROM tracks WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''`).all();
+  const {results:missing=[]}=await env.DB.prepare(`SELECT id,source,source_id,title,artist,album,isrc,duration_ms,artwork_url FROM tracks WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''`).all();
   const metadata_backfill=await backfillMetadata(env,missing);
   const {results:sourceRows=[]}=await env.DB.prepare(`SELECT id,source_id,title FROM tracks WHERE source='apple' AND (source_url IS NULL OR source_url='') AND source_id IS NOT NULL`).all();
   if(sourceRows.length)for(let offset=0;offset<sourceRows.length;offset+=100){const chunk=sourceRows.slice(offset,offset+100);await env.DB.batch(chunk.map(t=>env.DB.prepare(`UPDATE tracks SET source_url=? WHERE id=?`).bind(`https://music.apple.com/us/song/${slug(t.title)}/${String(t.source_id).replace(/^apple:/,'')}`,t.id)));}
