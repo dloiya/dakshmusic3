@@ -1,4 +1,5 @@
 import worker from "./worker.js";
+import { handleQueue, handleQueueCurrent, handleQueueReorder } from "./queue.js";
 
 const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(data), {
   status,
@@ -45,46 +46,22 @@ async function uploadAudioCallback(env, req, jobId) {
   const supplied = req.headers.get("X-Callback-Secret") || "";
   const expected = String(env.CALLBACK_SECRET || "");
   if (!expected || supplied.length !== expected.length) return json({ error: "Unauthorized" }, 401);
-
   let mismatch = 0;
   for (let i = 0; i < expected.length; i++) mismatch |= supplied.charCodeAt(i) ^ expected.charCodeAt(i);
   if (mismatch !== 0) return json({ error: "Unauthorized" }, 401);
-
   const job = await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(jobId).first();
   if (!job) return json({ error: "Job not found" }, 404);
-
   const url = new URL(req.url);
   const provider = url.searchParams.get("provider") || null;
   const format = url.searchParams.get("format") || "flac";
   const contentType = req.headers.get("content-type") || (format === "mp3" ? "audio/mpeg" : "audio/flac");
   const storageKey = `tracks/${job.track_id}.${format}`;
-
-  await env.AUDIO_BUCKET.put(storageKey, req.body, {
-    httpMetadata: { contentType },
-  });
-
-  await env.DB.prepare(`
-    UPDATE download_jobs
-    SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP
-    WHERE id=?
-  `).bind(provider, storageKey, format, contentType, jobId).run();
-
+  await env.AUDIO_BUCKET.put(storageKey, req.body, { httpMetadata: { contentType } });
+  await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(provider, storageKey, format, contentType, jobId).run();
   if (job.kind === "general") {
-    await env.DB.prepare(`
-      INSERT OR REPLACE INTO general_cache(track_id,drive_file_id,last_accessed_at)
-      VALUES(?,?,CURRENT_TIMESTAMP)
-    `).bind(job.track_id, storageKey).run();
-
-    await env.DB.prepare(`
-      DELETE FROM general_cache
-      WHERE track_id NOT IN (
-        SELECT track_id FROM general_cache
-        ORDER BY datetime(last_accessed_at) DESC
-        LIMIT 25
-      )
-    `).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO general_cache(track_id,drive_file_id,last_accessed_at) VALUES(?,?,CURRENT_TIMESTAMP)`).bind(job.track_id, storageKey).run();
+    await env.DB.prepare(`DELETE FROM general_cache WHERE track_id NOT IN (SELECT track_id FROM general_cache ORDER BY datetime(last_accessed_at) DESC LIMIT 25)`).run();
   }
-
   return json({ ok: true, storage_key: storageKey });
 }
 
@@ -92,11 +69,11 @@ async function withPlayerDetails(response) {
   const type = response.headers.get("content-type") || "";
   if (!type.includes("text/html")) return response;
   const html = await response.text();
-  if (html.includes("player-details.js")) return new Response(html, response);
-  const patched = html.replace(/<\/body>/i, '<script src="/player-details.js"></script></body>');
+  if (html.includes("queue-handler.js")) return new Response(html, response);
+  const injected = html.replace(/<\/body>/i, '<script src="/player-details.js"></script><script src="/queue-handler.js"></script><script src="/acquisition-ui.js"></script><script src="/player-ui.js"></script></body>');
   const headers = new Headers(response.headers);
   headers.set("content-type", "text/html; charset=utf-8");
-  return new Response(patched, { status: response.status, statusText: response.statusText, headers });
+  return new Response(injected, { status: response.status, statusText: response.statusText, headers });
 }
 
 export default {
@@ -104,11 +81,20 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // GitHub Actions audio callback: authenticate with CALLBACK_SECRET before
-    // the normal browser-session authentication in worker.js.
     const audioUploadMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)\/audio$/);
-    if (audioUploadMatch && (req.method === "PUT" || req.method === "POST")) {
-      return uploadAudioCallback(env, req, audioUploadMatch[1]);
+    if (audioUploadMatch && (req.method === "PUT" || req.method === "POST")) return uploadAudioCallback(env, req, audioUploadMatch[1]);
+
+    if (path === "/api/v1/queue/current") {
+      const response = await handleQueueCurrent(req, env);
+      if (response) return response;
+    }
+    if (path === "/api/v1/queue/reorder") {
+      const response = await handleQueueReorder(req, env);
+      if (response) return response;
+    }
+    if (path === "/api/v1/queue" || /^\/api\/v1\/queue\/\d+$/.test(path)) {
+      const response = await handleQueue(req, env);
+      if (response) return response;
     }
 
     if ((path === "/api/v1/acquisitions" || path === "/api/v1/jobs") && req.method === "GET") return listAcquisitions(env, req);
