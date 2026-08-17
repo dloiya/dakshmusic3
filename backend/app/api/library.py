@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import csv
+import io
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from ..connectors.cloudflare.r2 import R2Client
 from ..services.library.service import LibraryService
 from ..services.store import Store
 from .deps import get_store, require_session
@@ -59,3 +63,29 @@ async def get_album(album_id: int, store: Store = Depends(get_store), _: str = D
         raise HTTPException(404, "Album not found")
     tracks = await store.db.query("SELECT * FROM tracks WHERE album_id=? ORDER BY title COLLATE NOCASE", [album_id])
     return {"ok": True, "item": rows[0], "tracks": tracks}
+
+
+@router.get("/export")
+async def export_library(store: Store = Depends(get_store), _: str = Depends(require_session)):
+    rows = await store.db.query("SELECT title,artist,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,cache_requested FROM tracks ORDER BY title COLLATE NOCASE")
+    fields = ["title", "artist", "album_name", "source", "source_id", "source_url", "isrc", "duration_ms", "artwork_url", "cache_requested"]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=library.csv"})
+
+
+@router.get("/playback/{track_id}")
+async def playback(track_id: int, store: Store = Depends(get_store), _: str = Depends(require_session)):
+    track = await store.track(track_id)
+    if not track or not track.get("storage_key"):
+        raise HTTPException(404, "Audio not available")
+    obj = await R2Client(store.settings).get(track["storage_key"])
+    if obj is None:
+        raise HTTPException(404, "Audio object not found")
+    await store.db.query("UPDATE tracks SET play_count=play_count+1,updated_at=CURRENT_TIMESTAMP WHERE id=?", [track_id])
+    body = getattr(obj, "body", None) if not isinstance(obj, dict) else obj.get("Body")
+    if body is None:
+        raise HTTPException(500, "R2 object has no readable body")
+    return StreamingResponse(body, media_type="audio/flac", headers={"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"})
