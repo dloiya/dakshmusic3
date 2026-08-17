@@ -1,4 +1,3 @@
-from .. import __init__  # keep package import explicit
 from ...connectors.cloudflare.d1 import D1Client
 from ...domain.models import StatusResponse
 
