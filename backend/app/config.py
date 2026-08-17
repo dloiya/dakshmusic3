@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     cors_origins: str = "http://localhost:5173"
     cloudflare_account_id: str = ""
-    cloudflare_d1_database_id: str = ""
+    cloudflare_d1_database_id: str = "3f384751-424c-4628-ac18-384c068afd8b"
     cloudflare_api_token: str = ""
     r2_account_id: str = ""
     r2_access_key_id: str = ""
@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     github_repo: str = "dloiya/dakshmusic3"
     github_ref: str = "main"
     acquire_workflow: str = "acquire-audio.yml"
+    worker_public_url: str = ""
+    worker_callback_secret: str = ""
+    spotiflac_api_url: str = ""
     model_config = SettingsConfigDict(env_file=".env", env_prefix="DAKSH_", extra="ignore")
 
 
