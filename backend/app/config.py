@@ -28,16 +28,34 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    values={}
-    env=get_worker_env()
+    values = {}
+    env = get_worker_env()
     if env is not None:
-        mapping={
-            "DAKSH_ADMIN_PASSWORD":"admin_password","DAKSH_GITHUB_TOKEN":"github_token",
-            "DAKSH_WORKER_PUBLIC_URL":"worker_public_url","DAKSH_WORKER_CALLBACK_SECRET":"worker_callback_secret",
-            "DAKSH_SPOTIFLAC_API_URL":"spotiflac_api_url","DAKSH_CORS_ORIGINS":"cors_origins",
-            "DAKSH_ENVIRONMENT":"environment","DAKSH_SESSION_SECRET":"session_secret",
+        mapping = {
+            "DAKSH_ADMIN_PASSWORD": "admin_password",
+            "DAKSH_GITHUB_TOKEN": "github_token",
+            "DAKSH_WORKER_PUBLIC_URL": "worker_public_url",
+            "DAKSH_WORKER_CALLBACK_SECRET": "worker_callback_secret",
+            "DAKSH_SPOTIFLAC_API_URL": "spotiflac_api_url",
+            "DAKSH_CORS_ORIGINS": "cors_origins",
+            "DAKSH_ENVIRONMENT": "environment",
+            "DAKSH_SESSION_SECRET": "session_secret",
         }
-        for name,field in mapping.items():
-            value=getattr(env,name,None)
-            if value is not None: values[field]=str(value)
-    return Settings(**values)
+        for name, field in mapping.items():
+            value = getattr(env, name, None)
+            if value is not None:
+                values[field] = str(value)
+    settings = Settings(**values)
+    if settings.environment.lower() == "production":
+        if not settings.admin_password:
+            raise RuntimeError("DAKSH_ADMIN_PASSWORD is required in production")
+        if len(settings.admin_password) < 12:
+            raise RuntimeError("DAKSH_ADMIN_PASSWORD must be at least 12 characters in production")
+        if settings.session_secret == "change-me" or len(settings.session_secret) < 32:
+            raise RuntimeError("DAKSH_SESSION_SECRET must be a unique 32+ character secret in production")
+        if not settings.worker_callback_secret or len(settings.worker_callback_secret) < 32:
+            raise RuntimeError("DAKSH_WORKER_CALLBACK_SECRET must be a unique 32+ character secret in production")
+        origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+        if not origins or any("localhost" in o or "127.0.0.1" in o for o in origins):
+            raise RuntimeError("Production CORS_ORIGINS must contain only real application origins")
+    return settings
