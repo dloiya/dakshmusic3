@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .core.errors import AppError
+from .connectors.cloudflare.bindings import set_worker_env, reset_worker_env
 from .api.auth import router as auth_router
 from .api.library import router as library_router
 from .api.playlist import router as playlist_router
@@ -23,6 +24,17 @@ async def lifespan(app: FastAPI):
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def worker_binding_context(request: Request, call_next):
+    env = request.scope.get("env")
+    token = set_worker_env(env) if env is not None else None
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            reset_worker_env(token)
 
 
 @app.exception_handler(AppError)
