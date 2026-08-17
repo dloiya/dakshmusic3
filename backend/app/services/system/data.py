@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import uuid
 
 from ...config import Settings
+from ...connectors.cloudflare.bindings import get_worker_env
 from ...connectors.cloudflare.r2 import R2Client
 from ...connectors.deezer import DeezerConnector
 from ...repositories import D1Repository, LibraryRepository
 
 
 class DataService:
-    # Python Workers have substantial runtime overhead. Keep seed requests to one
-    # track so D1 + metadata work cannot accumulate CPU in a single invocation.
-    SEED_CHUNK_SIZE = 1
+    # Seed only performs bounded CSV normalization/dedupe and D1 writes.
+    # Metadata network work is handled asynchronously by the Queue consumer.
+    SEED_CHUNK_SIZE = 10
     METADATA_CONCURRENCY = 1
 
     def __init__(self, settings: Settings, db: D1Repository):
@@ -82,8 +82,6 @@ class DataService:
     async def _enrich_metadata(self, tracks):
         if not tracks:
             return 0
-        # One metadata lookup per invocation. Network wait does not count as CPU,
-        # but parsing/provider response data does, so never accumulate lookups.
         track = tracks[0]
         metadata = await self._metadata_for_track(track)
         if not metadata:
@@ -93,6 +91,17 @@ class DataService:
             [metadata.get("duration_ms"), metadata.get("artwork_url"), metadata.get("source"), metadata.get("source_id"), metadata.get("source_url"), metadata.get("album_name"), track.get("isrc"), track.get("isrc"), track["title"], track["artist"]],
         )])
         return 1
+
+    async def _enqueue_metadata(self, tracks):
+        env = get_worker_env()
+        queue = getattr(env, "METADATA_QUEUE", None) if env is not None else None
+        if queue is None:
+            return 0
+        queued = 0
+        for track in tracks:
+            await queue.send(track)
+            queued += 1
+        return queued
 
     async def _insert_import_rows(self, job_id, rows):
         tracks = []
@@ -113,8 +122,8 @@ class DataService:
             statements.append(("""INSERT INTO tracks(title,artist,album_name,isrc,cache_requested) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""", [track["title"],track["artist"],track["album"],track["isrc"],track["cache"],track["isrc"],track["isrc"],track["title"],track["artist"],track["album"]]))
         if statements:
             await self.db.batch(statements)
-        enriched = await self._enrich_metadata(tracks)
-        return len(tracks), failed, enriched
+        queued = await self._enqueue_metadata(tracks)
+        return len(tracks), failed, queued
 
     async def start_import(self, filename, total):
         job_id = str(uuid.uuid4())
@@ -127,7 +136,7 @@ class DataService:
         job = await self.db.one("SELECT * FROM import_jobs WHERE id=?", [job_id])
         if not job:
             raise ValueError("Import job not found")
-        imported, failed, enriched = await self._insert_import_rows(job_id, rows)
+        imported, failed, queued = await self._insert_import_rows(job_id, rows)
         processed = job["processed_rows"] + len(rows)
         total_imported = job["imported_rows"] + imported
         total_failed = job["failed_rows"] + failed
@@ -137,7 +146,7 @@ class DataService:
             await self.db.execute("UPDATE import_jobs SET status='complete',processed_rows=?,imported_rows=?,failed_rows=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed,total_imported,total_failed,job_id])
         else:
             await self.db.execute("UPDATE import_jobs SET processed_rows=?,imported_rows=?,failed_rows=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed,total_imported,total_failed,job_id])
-        return {"ok":True,"job_id":job_id,"processed":processed,"total":job["total_rows"],"imported":total_imported,"failed":total_failed,"metadata_enriched":enriched,"complete":done}
+        return {"ok":True,"job_id":job_id,"processed":processed,"total":job["total_rows"],"imported":total_imported,"failed":total_failed,"metadata_queued":queued,"complete":done}
 
     async def import_csv(self, filename: str, content: bytes):
         rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
