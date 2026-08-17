@@ -1,8 +1,5 @@
 import entry from "./entry.js";
-import { handleLibraryRoute } from "./library.js";
-import { handleLibraryV2, scheduled as libraryScheduled } from "./library_v2.js";
 import { handleLibraryV3 } from "./library_v3.js";
-import { handleAcquisitionV3 } from "./acquisition_v3.js";
 import { backfillMissingMetadata } from "./metadata_backfill.js";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -10,10 +7,13 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
   headers: { "content-type": "application/json; charset=utf-8" },
 });
 
-async function runMetadataBackfill(env) {
-  const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 6 });
-  console.log("Scheduled metadata backfill", result);
-  return result;
+async function authenticated(env, request) {
+  const token = (request.headers.get("Cookie") || "").match(/(?:^|;\s*)music_session=([^;]+)/)?.[1];
+  if (!token) return false;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const hash = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, "0")).join("");
+  return !!await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`)
+    .bind(hash, Math.floor(Date.now() / 1000)).first();
 }
 
 export default {
@@ -24,46 +24,23 @@ export default {
     }
 
     if (url.pathname === "/api/v1/library/backfill-metadata" && request.method === "POST") {
-      const token = (request.headers.get("Cookie") || "").match(/(?:^|;\\s*)music_session=([^;]+)/)?.[1];
-      if (!token) return json({ error: "Authentication required" }, 401);
-      const cryptoHash = async text => {
-        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-        return [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, "0")).join("");
-      };
-      const session = await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`)
-        .bind(await cryptoHash(token), Math.floor(Date.now() / 1000)).first();
-      if (!session) return json({ error: "Authentication required" }, 401);
+      if (!(await authenticated(env, request))) return json({ error: "Authentication required" }, 401);
       const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 6 });
-      const { results = [] } = await env.DB.prepare(`
-        SELECT COUNT(*) AS count FROM tracks
-        WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''
-      `).all();
-      return json({ ok: true, metadata_backfill: { ...result, remaining: Number(results[0]?.count || 0), batch_limit: 20 } });
+      const remaining = await env.DB.prepare(`SELECT COUNT(*) AS count FROM tracks WHERE duration_ms IS NULL OR duration_ms<=0 OR artwork_url IS NULL OR artwork_url=''`).first();
+      return json({ ok: true, metadata_backfill: { ...result, remaining: Number(remaining?.count || 0), batch_limit: 20 } });
     }
 
-    const acquisition = await handleAcquisitionV3(request, env);
-    if (acquisition) return acquisition;
-
-    const v3 = await handleLibraryV3(request, env);
-    if (v3) return v3;
-
-    const v2 = await handleLibraryV2(request, env, ctx);
-    if (v2) return v2;
-    const handled = await handleLibraryRoute(request, env, ctx);
-    if (handled) return handled;
+    const library = await handleLibraryV3(request, env);
+    if (library) return library;
     return entry.fetch(request, env, ctx);
   },
 
-  async scheduled(controller, env, ctx) {
-    console.log("Cron metadata backfill fired", controller.cron, controller.scheduledTime);
+  async scheduled(controller, env) {
     try {
-      await runMetadataBackfill(env);
+      const result = await backfillMissingMetadata(env, { limit: 20, concurrency: 4 });
+      console.log("Scheduled metadata backfill", controller.cron, result);
     } catch (error) {
       console.error("Scheduled metadata backfill failed", error?.stack || error);
-      throw error;
     }
-    ctx.waitUntil(Promise.resolve().then(() => libraryScheduled(env)).catch(error => {
-      console.error("Scheduled cache warm failed", error?.stack || error);
-    }));
   },
 };
