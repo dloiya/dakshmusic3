@@ -1,7 +1,7 @@
 (() => {
   const API = "/api/v1";
   const QUEUE_API = "/api/v1/playback-queue";
-  const QUEUE_KEY = "daksh-queue-v8";
+  const QUEUE_KEY = "daksh-queue-v9";
   const CACHE_NAME = "device-audio-v1";
   const esc = v => String(v ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
 
@@ -28,34 +28,45 @@
 
   async function sync() { return apply(await api(QUEUE_API)); }
 
+  async function warmQueue(items) {
+    // Populate the server general_cache for the whole active queue. The
+    // acquisition endpoint is idempotent and deduplicates already cached or
+    // already-running jobs, so this can safely run in the background.
+    const tracks = (items || []).filter(t => t && (t.id != null || t.track_id != null));
+    await Promise.allSettled(tracks.map(async t => {
+      const id = t.id ?? t.track_id;
+      try { await api(`/tracks/${encodeURIComponent(id)}/acquire`, {method:"POST"}); } catch {}
+    }));
+  }
+
   async function replace(items, current = 0, mode = "manual") {
     const clean = (items || []).filter(x => x && (x.id != null || x.track_id != null));
     const idx = clean.length ? Math.max(0, Math.min(Number(current) || 0, clean.length - 1)) : -1;
     const d = await api(QUEUE_API, { method:"POST", body:JSON.stringify({ mode:"replace", items:clean, current_index:idx, playback_mode:mode }) });
-    return apply(d, {items:clean, current_index:idx, mode});
+    const result = apply(d, {items:clean, current_index:idx, mode});
+    // Start acquisition immediately instead of waiting until a later track
+    // is selected. This keeps general_cache populated for queue playback.
+    warmQueue(result.items);
+    return result;
   }
 
   async function append(items) {
     const clean = (items || []).filter(x => x && (x.id != null || x.track_id != null));
     if (!clean.length) return state;
-    return apply(await api(QUEUE_API, { method:"POST", body:JSON.stringify({mode:"append",items:clean}) }), state);
+    const result = apply(await api(QUEUE_API, {method:"POST", body:JSON.stringify({mode:"append",items:clean})}), state);
+    warmQueue(clean);
+    return result;
   }
 
   async function clear() { return apply(await api(QUEUE_API, {method:"DELETE"})); }
-
-  async function setCurrent(index) {
-    return apply(await api(`${QUEUE_API}/current`, {method:"POST", body:JSON.stringify({index})}), state);
-  }
-
+  async function setCurrent(index) { return apply(await api(`${QUEUE_API}/current`, {method:"POST", body:JSON.stringify({index})}), state); }
   async function remove(index) { return apply(await api(`${QUEUE_API}/${encodeURIComponent(index)}`, {method:"DELETE"}), state); }
   async function reorder(from,to) { return apply(await api(`${QUEUE_API}/reorder`, {method:"POST", body:JSON.stringify({from,to})}), state); }
 
   async function deviceCached(id) {
     if (!("caches" in window) || id == null) return false;
-    try {
-      const c = await caches.open(CACHE_NAME);
-      return !!await c.match(`${location.origin}${API}/playback/${encodeURIComponent(id)}`);
-    } catch { return false; }
+    try { const c = await caches.open(CACHE_NAME); return !!await c.match(`${location.origin}${API}/playback/${encodeURIComponent(id)}`); }
+    catch { return false; }
   }
 
   async function cacheFlags(items) {
@@ -80,8 +91,17 @@
     return playIndex(index);
   }
 
-  async function next() { return state.current_index + 1 < state.items.length ? playIndex(state.current_index + 1) : null; }
-  async function previous() { return state.current_index > 0 ? playIndex(state.current_index - 1) : null; }
+  async function next() {
+    // Re-read the authoritative server queue before advancing so an ended
+    // event can never get stuck on a stale first-track state.
+    try { await sync(); } catch {}
+    return state.current_index + 1 < state.items.length ? playIndex(state.current_index + 1) : null;
+  }
+
+  async function previous() {
+    try { await sync(); } catch {}
+    return state.current_index > 0 ? playIndex(state.current_index - 1) : null;
+  }
 
   function sameQueue(items) {
     if (!Array.isArray(items) || items.length !== state.items.length) return false;
@@ -93,21 +113,23 @@
     const id = String(track?.id ?? track?.track_id);
     const index = list.findIndex(x => String(x?.id ?? x?.track_id) === id);
     if (index < 0) return state;
-    if (!sameQueue(list) || state.mode !== mode || state.current_index !== index) {
-      return replace(list, index, mode || "manual");
-    }
+    if (!sameQueue(list) || state.mode !== mode || state.current_index !== index) return replace(list, index, mode || "manual");
     return state;
   }
 
   async function playTrackDirect(track, list, mode) {
-    await ensureSourceQueue(track, list, mode);
+    const queued = await ensureSourceQueue(track, list, mode);
     const id = track?.id ?? track?.track_id;
     if (id == null) throw new Error("Track has no ID");
-    if (window.__dakshNowPlayingTrackGetter) window.__dakshNowPlayingTrackGetter = window.__dakshNowPlayingTrackGetter;
+    // Ensure acquisition is queued before playback. If already cached, this
+    // returns immediately; otherwise the current and remaining queue tracks
+    // are already being warmed by replace().
+    try { await api(`/tracks/${encodeURIComponent(id)}/acquire`, {method:"POST"}); } catch {}
     const audio = document.getElementById("audio");
     if (!audio) throw new Error("Audio player unavailable");
     audio.src = `${API}/playback/${encodeURIComponent(id)}`;
     await audio.play();
+    return queued;
   }
 
   function sourceLabel() {
@@ -119,9 +141,14 @@
     if (!overlay) {
       overlay = document.createElement("div");
       overlay.id = "dakshQueueOverlay";
-      overlay.innerHTML = `<div class="dq-head"><div><b>Queue</b><small id="dqSource"></small></div><button id="dqClose">MENU</button></div><div id="dqBody"></div><div class="dq-foot"><button id="dqClear">Clear</button></div>`;
+      overlay.innerHTML = `<div class="dq-head"><button id="dqBack" class="dq-back" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/><path d="M9 12h11"/></svg></button><div class="dq-title"><b>Queue</b><small id="dqSource"></small></div></div><div id="dqBody"></div><div class="dq-foot"><button id="dqClear">Clear</button></div>`;
       document.getElementById("screen")?.appendChild(overlay);
-      overlay.querySelector("#dqClose").onclick = () => overlay.remove();
+      overlay.querySelector("#dqBack").onclick = () => {
+        overlay.remove();
+        // MENU on the physical wheel is the app's real back/navigation action.
+        // Invoke it programmatically so Queue follows the same navigation stack.
+        document.getElementById("btnMenu")?.click();
+      };
       overlay.querySelector("#dqClear").onclick = async () => { if (confirm("Clear the queue?")) { await clear(); await renderOverlay(); } };
     }
     const body = overlay.querySelector("#dqBody");
@@ -136,7 +163,7 @@
     try { await sync(); await renderOverlay(); }
     catch (e) {
       const screen = document.getElementById("screen");
-      if (screen) { const error=document.createElement("div"); error.id="dakshQueueOverlay"; error.className="dq-error"; error.textContent=`Queue unavailable: ${e.message}`; screen.appendChild(error); }
+      if (screen) { const error=document.createElement("div"); error.id="dakshQueueOverlay"; error.className="dq-error"; error.innerHTML=`<button id="dqBackError" class="dq-back" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/><path d="M9 12h11"/></svg></button><span>${esc(`Queue unavailable: ${e.message}`)}</span>`; error.querySelector("#dqBackError").onclick=()=>{error.remove();document.getElementById("btnMenu")?.click();}; screen.appendChild(error); }
     }
   }
 
@@ -147,8 +174,6 @@
     if (index >= 0 && index !== state.current_index) await setCurrent(index);
   }
 
-  // This is the single bridge used by app.js. It also handles playlist playback,
-  // which previously bypassed the queue API entirely.
   window.__dakshQueuePlayTrack = async (track, list, mode) => {
     if (!Array.isArray(list) || !list.length) {
       if (!state.items.length) await sync();
@@ -163,9 +188,10 @@
   window.__dakshQueueSyncCurrent = syncCurrentFromTrack;
   window.__dakshQueuePlay = playIndex;
 
-  document.getElementById("audio")?.addEventListener("ended", () => next());
+  const audio = document.getElementById("audio");
+  audio?.addEventListener("ended", () => { next().catch(() => {}); });
 
   const style = document.createElement("style");
-  style.textContent = `#dakshQueueOverlay{position:absolute;inset:22px 0 0;background:linear-gradient(180deg,var(--screen-top),var(--screen-bg));z-index:30;color:var(--screen-ink);display:flex;flex-direction:column}.dq-head{display:flex;align-items:center;justify-content:space-between;padding:7px 9px;border-bottom:1px solid rgba(0,0,0,.12);font-size:11px}.dq-head small{font-size:8px;color:var(--screen-sub);margin-left:4px}.dq-head button,.dq-foot button{border:0;background:transparent;color:var(--screen-sub);font-size:9px;font-weight:700}#dqBody{overflow:auto;min-height:0;flex:1}.dq-row{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:6px 8px;border-bottom:1px solid rgba(0,0,0,.06);cursor:pointer}.dq-row.cur{background:linear-gradient(180deg,var(--sel-a),var(--sel-b));color:#fff}.dq-row.device-ready{box-shadow:inset 3px 0 0 #3f9e4d}.dq-main{display:flex;gap:6px;min-width:0}.dq-pos{width:14px;flex:none;text-align:right;font-size:8px;color:var(--screen-sub)}.dq-row.cur .dq-pos,.dq-row.cur small,.dq-row.cur .dq-state{color:#dbe6f5}.dq-text{min-width:0}.dq-text b,.dq-text small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dq-text b{font-size:9.5px}.dq-text small{font-size:8px;color:var(--screen-sub)}.dq-badges{display:flex;gap:3px;margin-top:2px}.dq-badge{display:inline-block;padding:1px 3px;border-radius:3px;font-size:6.5px;font-weight:800;letter-spacing:.04em}.dq-badge.device{background:#dcefdc;color:#286c31}.dq-badge.server{background:#dbe7f6;color:#2f5f97}.dq-row.cur .dq-badge.device{background:#c8e8cc;color:#205b28}.dq-row.cur .dq-badge.server{background:#c6d8ef;color:#234c79}.dq-state{font-size:7px;color:#3f7d47;flex:none}.dq-empty,.dq-error{padding:30px;text-align:center;font-size:10px;color:var(--screen-sub)}.dq-error{position:absolute;inset:22px 0 0;background:var(--screen-bg);z-index:30}.dq-foot{margin-top:auto;padding:5px 9px;border-top:1px solid rgba(0,0,0,.08);text-align:right}`;
+  style.textContent = `#dakshQueueOverlay{position:absolute;inset:22px 0 0;background:linear-gradient(180deg,var(--screen-top),var(--screen-bg));z-index:30;color:var(--screen-ink);display:flex;flex-direction:column}.dq-head{display:flex;align-items:center;gap:7px;padding:5px 7px;border-bottom:1px solid rgba(0,0,0,.12);font-size:11px}.dq-back{border:0;background:transparent;color:var(--screen-sub);width:24px;height:24px;padding:3px;display:flex;align-items:center;justify-content:center;cursor:pointer}.dq-back svg{width:17px;height:17px}.dq-back:hover{color:var(--screen-ink)}.dq-title{display:flex;align-items:baseline;gap:3px}.dq-head small{font-size:8px;color:var(--screen-sub)}#dqBody{overflow:auto;min-height:0;flex:1}.dq-row{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:6px 8px;border-bottom:1px solid rgba(0,0,0,.06);cursor:pointer}.dq-row.cur{background:linear-gradient(180deg,var(--sel-a),var(--sel-b));color:#fff}.dq-row.device-ready{box-shadow:inset 3px 0 0 #3f9e4d}.dq-main{display:flex;gap:6px;min-width:0}.dq-pos{width:14px;flex:none;text-align:right;font-size:8px;color:var(--screen-sub)}.dq-row.cur .dq-pos,.dq-row.cur small,.dq-row.cur .dq-state{color:#dbe6f5}.dq-text{min-width:0}.dq-text b,.dq-text small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dq-text b{font-size:9.5px}.dq-text small{font-size:8px;color:var(--screen-sub)}.dq-badges{display:flex;gap:3px;margin-top:2px}.dq-badge{display:inline-block;padding:1px 3px;border-radius:3px;font-size:6.5px;font-weight:800;letter-spacing:.04em}.dq-badge.device{background:#dcefdc;color:#286c31}.dq-badge.server{background:#dbe7f6;color:#2f5f97}.dq-row.cur .dq-badge.device{background:#c8e8cc;color:#205b28}.dq-row.cur .dq-badge.server{background:#c6d8ef;color:#234c79}.dq-state{font-size:7px;color:#3f7d47;flex:none}.dq-empty,.dq-error{padding:30px;text-align:center;font-size:10px;color:var(--screen-sub)}.dq-error{position:absolute;inset:22px 0 0;background:var(--screen-bg);z-index:30}.dq-error .dq-back{position:absolute;left:5px;top:4px}.dq-error span{display:block}`;
   document.head.appendChild(style);
 })();
