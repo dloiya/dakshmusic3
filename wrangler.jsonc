@@ -14,7 +14,8 @@
     {
       "binding": "DB",
       "database_name": "dakshmusic3",
-      "database_id": "3f384751-424c-4628-ac18-384c068afd8b"
+      "database_id": "3f384751-424c-4628-ac18-384c068afd8b",
+      "migrations_dir": "db/migrations"
     }
   ],
   "r2_buckets": [
@@ -22,5 +23,8 @@
       "binding": "AUDIO",
       "bucket_name": "dakshmusic3-audio"
     }
-  ]
+  ],
+  "secrets": {
+    "required": ["DAKSH_ADMIN_PASSWORD", "DAKSH_GITHUB_TOKEN", "DAKSH_WORKER_CALLBACK_SECRET"]
+  }
 }
