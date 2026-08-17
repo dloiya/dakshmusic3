@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import csv
-import difflib
 import io
 import uuid
 
 from ...config import Settings
 from ...connectors.cloudflare.r2 import R2Client
-from ...connectors.deezer import DeezerConnector
 from ...repositories import D1Repository, LibraryRepository
 
 
@@ -18,8 +15,6 @@ class DataService:
         self.db = db
         self.library = LibraryRepository(db)
         self.r2 = R2Client(settings)
-        self.deezer = DeezerConnector()
-        self.deezer.base_url = settings.deezer_api_url.rstrip("/")
 
     async def clear_all(self, include_audio=True):
         deleted = await self.r2.delete_all() if include_audio else 0
@@ -38,73 +33,26 @@ class DataService:
 
     @classmethod
     def _track(cls, row):
+        # Authoritative CSV schema:
+        # Track name, Artist name, Album, Playlist name, Type, ISRC, Apple - id, 100 Cache.
         title = cls._v(row, "track_name", "track title", "title", "song title", "name") or "Unknown"
         artist = cls._v(row, "artist_name", "artist", "artists", "track artist") or "Unknown"
         album = cls._v(row, "album", "album_name", "album_title")
         isrc = cls._v(row, "isrc")
         apple_id = cls._v(row, "apple_id", "apple id", "apple - id")
+        playlist = cls._v(row, "playlist_name", "playlist")
+        track_type = cls._v(row, "type")
         cache = cls._v(row, "100cache", "100 cache", "cache", "top cache") or ""
-        return {"title": title, "artist": artist, "album": album, "isrc": isrc, "apple_id": apple_id, "cache": int(cache.lower() in {"1", "true", "yes", "y"})}
-
-    @staticmethod
-    def _score(item, track):
-        title = difflib.SequenceMatcher(None, (item.get("title") or "").casefold(), track["title"].casefold()).ratio()
-        artist = difflib.SequenceMatcher(None, (item.get("artist") or "").casefold(), track["artist"].casefold()).ratio()
-        album = difflib.SequenceMatcher(None, (item.get("album_name") or "").casefold(), (track["album"] or "").casefold()).ratio() if track["album"] else 0.0
-        return title * 0.55 + artist * 0.35 + album * 0.10
-
-    async def _metadata(self, track):
-        # ISRC is the authoritative identity from the CSV. It is always tried first.
-        if track["isrc"]:
-            try:
-                results = await self.deezer.search(track["isrc"], limit=10)
-                if results:
-                    exact = [item for item in results if str(item.get("isrc") or "").casefold() == track["isrc"].casefold()]
-                    best = exact[0] if exact else max(results, key=lambda item: self._score(item, track))
-                    if exact or self._score(best, track) >= 0.55:
-                        if best.get("source_id"):
-                            metadata = await self.deezer.metadata(best["source_id"])
-                            if metadata:
-                                return metadata
-            except Exception:
-                pass
-
-        # Apple ID is a secondary identifier, never the primary identity.
-        if track["apple_id"]:
-            try:
-                results = await self.deezer.search(f'"{track["artist"]}" "{track["title"]}"', limit=10)
-                if results:
-                    best = max(results, key=lambda item: self._score(item, track))
-                    if self._score(best, track) >= 0.55 and best.get("source_id"):
-                        metadata = await self.deezer.metadata(best["source_id"])
-                        if metadata:
-                            return metadata
-            except Exception:
-                pass
-
-        try:
-            results = await self.deezer.search(f'"{track["artist"]}" "{track["title"]}"', limit=10)
-            if results:
-                best = max(results, key=lambda item: self._score(item, track))
-                if self._score(best, track) >= 0.55 and best.get("source_id"):
-                    return await self.deezer.metadata(best["source_id"])
-        except Exception:
-            pass
-        return {}
-
-    async def _enrich_rows(self, tracks):
-        semaphore = asyncio.Semaphore(8)
-
-        async def enrich(track):
-            async with semaphore:
-                metadata = await self._metadata(track)
-                if metadata:
-                    for field in ("duration_ms", "artwork_url", "source", "source_id", "source_url"):
-                        if metadata.get(field):
-                            track[field] = metadata[field]
-                return track
-
-        return await asyncio.gather(*(enrich(track) for track in tracks))
+        return {
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "isrc": isrc,
+            "apple_id": apple_id,
+            "playlist": playlist,
+            "type": track_type,
+            "cache": int(cache.lower() in {"1", "true", "yes", "y"}),
+        }
 
     async def _insert_import_rows(self, job_id, rows):
         tracks = []
@@ -113,24 +61,58 @@ class DataService:
         for row in rows:
             try:
                 track = self._track(row)
-                key = ("isrc", track["isrc"].casefold()) if track["isrc"] else ("text", track["title"].casefold(), track["artist"].casefold(), (track["album"] or "").casefold())
+                # ISRC is the authoritative identity. Fall back to normalized
+                # title/artist/album only when the CSV has no ISRC.
+                key = (
+                    ("isrc", track["isrc"].casefold())
+                    if track["isrc"]
+                    else ("text", track["title"].casefold(), track["artist"].casefold(), (track["album"] or "").casefold())
+                )
                 if key not in seen:
                     seen.add(key)
                     tracks.append(track)
             except Exception:
                 failed += 1
-        tracks = list(await self._enrich_rows(tracks))
+
+        # IMPORTANT: no provider/network metadata calls happen here.
+        # Seed must remain a short, deterministic D1 operation. Metadata is
+        # enriched by the separate metadata/acquisition worker after import.
         statements = []
         for track in tracks:
-            statements.append(("""UPDATE tracks SET title=?, artist=?, album_name=?, source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), isrc=COALESCE(?,isrc), duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), cache_requested=MAX(cache_requested,?), updated_at=CURRENT_TIMESTAMP WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(artist,''))) IN (LOWER(TRIM(?)), 'unknown') AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))""", [track["title"], track["artist"], track["album"], track.get("source"), track.get("source_id"), track.get("source_url"), track["isrc"], track.get("duration_ms"), track.get("artwork_url"), track["cache"], track["isrc"], track["isrc"], track["title"], track["artist"], track["album"]]))
-            statements.append(("""INSERT INTO tracks(title,artist,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,cache_requested) SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""", [track["title"], track["artist"], track["album"], track.get("source"), track.get("source_id"), track.get("source_url"), track["isrc"], track.get("duration_ms"), track.get("artwork_url"), track["cache"], track["isrc"], track["isrc"], track["title"], track["artist"], track["album"]]))
+            statements.append((
+                """UPDATE tracks SET
+                    title=?, artist=?, album_name=?,
+                    isrc=COALESCE(?,isrc),
+                    cache_requested=MAX(cache_requested,?),
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?))
+                   OR (LOWER(TRIM(title))=LOWER(TRIM(?))
+                       AND LOWER(TRIM(COALESCE(artist,'')))=LOWER(TRIM(?))
+                       AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))""",
+                [track["title"], track["artist"], track["album"], track["isrc"], track["cache"], track["isrc"], track["isrc"], track["title"], track["artist"], track["album"]],
+            ))
+            statements.append((
+                """INSERT INTO tracks(title,artist,album_name,isrc,cache_requested)
+                SELECT ?,?,?,?,?
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tracks WHERE
+                    (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?))
+                    OR (LOWER(TRIM(title))=LOWER(TRIM(?))
+                        AND LOWER(TRIM(artist))=LOWER(TRIM(?))
+                        AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))
+                )""",
+                [track["title"], track["artist"], track["album"], track["isrc"], track["cache"], track["isrc"], track["isrc"], track["title"], track["artist"], track["album"]],
+            ))
         if statements:
             await self.db.batch(statements)
         return len(tracks), failed
 
     async def start_import(self, filename, total):
         job_id = str(uuid.uuid4())
-        await self.db.execute("INSERT INTO import_jobs(id,filename,status,total_rows,started_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)", [job_id, filename, "running", total])
+        await self.db.execute(
+            "INSERT INTO import_jobs(id,filename,status,total_rows,started_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)",
+            [job_id, filename, "running", total],
+        )
         return job_id
 
     async def import_chunk(self, job_id, rows, done=False):
@@ -143,10 +125,20 @@ class DataService:
         total_failed = job["failed_rows"] + failed
         if done:
             await self.db.execute("DELETE FROM playlist_entries WHERE id NOT IN (SELECT MIN(id) FROM playlist_entries GROUP BY track_id)")
-            await self.db.execute("""INSERT INTO playlist_entries(track_id,position) SELECT t.id,COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1 FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL""")
-            await self.db.execute("UPDATE import_jobs SET status='complete',processed_rows=?,imported_rows=?,failed_rows=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed, total_imported, total_failed, job_id])
+            await self.db.execute(
+                """INSERT INTO playlist_entries(track_id,position)
+                SELECT t.id,COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1
+                FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL"""
+            )
+            await self.db.execute(
+                "UPDATE import_jobs SET status='complete',processed_rows=?,imported_rows=?,failed_rows=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                [processed, total_imported, total_failed, job_id],
+            )
         else:
-            await self.db.execute("UPDATE import_jobs SET processed_rows=?,imported_rows=?,failed_rows=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed, total_imported, total_failed, job_id])
+            await self.db.execute(
+                "UPDATE import_jobs SET processed_rows=?,imported_rows=?,failed_rows=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                [processed, total_imported, total_failed, job_id],
+            )
         return {"ok": True, "job_id": job_id, "processed": processed, "total": job["total_rows"], "imported": total_imported, "failed": total_failed, "complete": done}
 
     async def import_csv(self, filename: str, content: bytes):
