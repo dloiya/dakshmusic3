@@ -12,8 +12,10 @@ from ...repositories import D1Repository, LibraryRepository
 
 
 class DataService:
-    SEED_CHUNK_SIZE = 10
-    METADATA_CONCURRENCY = 2
+    # Python Workers have substantial runtime overhead. Keep seed requests to one
+    # track so D1 + metadata work cannot accumulate CPU in a single invocation.
+    SEED_CHUNK_SIZE = 1
+    METADATA_CONCURRENCY = 1
 
     def __init__(self, settings: Settings, db: D1Repository):
         self.settings = settings
@@ -47,38 +49,20 @@ class DataService:
         playlist = cls._v(row, "playlist_name", "playlist")
         track_type = cls._v(row, "type")
         cache = cls._v(row, "100cache", "100 cache", "cache", "top cache") or ""
-        return {
-            "title": title,
-            "artist": artist,
-            "album": album,
-            "isrc": isrc,
-            "apple_id": apple_id,
-            "playlist": playlist,
-            "type": track_type,
-            "cache": int(cache.lower() in {"1", "true", "yes", "y"}),
-        }
+        return {"title": title, "artist": artist, "album": album, "isrc": isrc, "apple_id": apple_id, "playlist": playlist, "type": track_type, "cache": int(cache.lower() in {"1", "true", "yes", "y"})}
 
     @staticmethod
     def _norm(value):
         return " ".join(str(value or "").casefold().split())
 
     async def _metadata_for_track(self, track):
-        """Resolve metadata without blocking the seed request on many concurrent calls.
-
-        ISRC is the first lookup key. Deezer's public search API does not return an
-        ISRC in its search payload, so a result is accepted only when its title and
-        artist match the imported row. If ISRC search cannot resolve it, the same
-        matching logic falls back to title + artist.
-        """
         queries = []
         if track.get("isrc"):
             queries.append(track["isrc"])
         queries.append(f'{track["title"]} {track["artist"]}')
-
         wanted_title = self._norm(track["title"])
         wanted_artist = self._norm(track["artist"])
         wanted_album = self._norm(track.get("album"))
-
         for query in queries:
             try:
                 results = await self.deezer.search(query, limit=8)
@@ -86,14 +70,9 @@ class DataService:
                 continue
             best = None
             for item in results:
-                title = self._norm(item.get("title"))
-                artist = self._norm(item.get("artist"))
-                album = self._norm(item.get("album_name"))
-                if title != wanted_title or artist != wanted_artist:
+                if self._norm(item.get("title")) != wanted_title or self._norm(item.get("artist")) != wanted_artist:
                     continue
-                score = 2
-                if wanted_album and album == wanted_album:
-                    score += 1
+                score = 2 + int(bool(wanted_album and self._norm(item.get("album_name")) == wanted_album))
                 if best is None or score > best[0]:
                     best = (score, item)
             if best:
@@ -101,38 +80,19 @@ class DataService:
         return None
 
     async def _enrich_metadata(self, tracks):
-        semaphore = asyncio.Semaphore(self.METADATA_CONCURRENCY)
-
-        async def resolve(track):
-            async with semaphore:
-                return track, await self._metadata_for_track(track)
-
-        results = await asyncio.gather(*(resolve(track) for track in tracks), return_exceptions=True)
-        statements = []
-        enriched = 0
-        for result in results:
-            if isinstance(result, Exception):
-                continue
-            track, metadata = result
-            if not metadata:
-                continue
-            statements.append((
-                """UPDATE tracks SET
-                    duration_ms=COALESCE(?,duration_ms),
-                    artwork_url=COALESCE(?,artwork_url),
-                    source=COALESCE(?,source),
-                    source_id=COALESCE(?,source_id),
-                    source_url=COALESCE(?,source_url),
-                    album_name=COALESCE(NULLIF(album_name,''),?),
-                    updated_at=CURRENT_TIMESTAMP
-                WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?))
-                   OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)))""",
-                [metadata.get("duration_ms"), metadata.get("artwork_url"), metadata.get("source"), metadata.get("source_id"), metadata.get("source_url"), metadata.get("album_name"), track.get("isrc"), track.get("isrc"), track["title"], track["artist"]],
-            ))
-            enriched += 1
-        if statements:
-            await self.db.batch(statements)
-        return enriched
+        if not tracks:
+            return 0
+        # One metadata lookup per invocation. Network wait does not count as CPU,
+        # but parsing/provider response data does, so never accumulate lookups.
+        track = tracks[0]
+        metadata = await self._metadata_for_track(track)
+        if not metadata:
+            return 0
+        await self.db.batch([(
+            """UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), album_name=COALESCE(NULLIF(album_name,''),?), updated_at=CURRENT_TIMESTAMP WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)))""",
+            [metadata.get("duration_ms"), metadata.get("artwork_url"), metadata.get("source"), metadata.get("source_id"), metadata.get("source_url"), metadata.get("album_name"), track.get("isrc"), track.get("isrc"), track["title"], track["artist"]],
+        )])
+        return 1
 
     async def _insert_import_rows(self, job_id, rows):
         tracks = []
@@ -147,20 +107,10 @@ class DataService:
                     tracks.append(track)
             except Exception:
                 failed += 1
-
         statements = []
         for track in tracks:
-            statements.append((
-                """UPDATE tracks SET title=?,artist=?,album_name=?,isrc=COALESCE(?,isrc),cache_requested=MAX(cache_requested,?),updated_at=CURRENT_TIMESTAMP
-                WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?))
-                   OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(artist,'')))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))""",
-                [track["title"],track["artist"],track["album"],track["isrc"],track["cache"],track["isrc"],track["isrc"],track["title"],track["artist"],track["album"]],
-            ))
-            statements.append((
-                """INSERT INTO tracks(title,artist,album_name,isrc,cache_requested) SELECT ?,?,?,?,?
-                WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""",
-                [track["title"],track["artist"],track["album"],track["isrc"],track["cache"],track["isrc"],track["isrc"],track["title"],track["artist"],track["album"]],
-            ))
+            statements.append(("""UPDATE tracks SET title=?,artist=?,album_name=?,isrc=COALESCE(?,isrc),cache_requested=MAX(cache_requested,?),updated_at=CURRENT_TIMESTAMP WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(artist,'')))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))""", [track["title"],track["artist"],track["album"],track["isrc"],track["cache"],track["isrc"],track["isrc"],track["title"],track["artist"],track["album"]]))
+            statements.append(("""INSERT INTO tracks(title,artist,album_name,isrc,cache_requested) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""", [track["title"],track["artist"],track["album"],track["isrc"],track["cache"],track["isrc"],track["isrc"],track["title"],track["artist"],track["album"]]))
         if statements:
             await self.db.batch(statements)
         enriched = await self._enrich_metadata(tracks)
