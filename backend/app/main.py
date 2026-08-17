@@ -12,6 +12,7 @@ from .api.acquire import router as acquire_router
 from .api.seed import router as seed_router
 from .api.cache import router as cache_router
 from .api.status import router as status_router
+from .api.crud import router as crud_router
 
 
 @asynccontextmanager
@@ -21,13 +22,7 @@ async def lifespan(app: FastAPI):
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="2.0.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.exception_handler(AppError)
@@ -41,5 +36,5 @@ async def health():
     return {"ok": True, "service": settings.app_name, "version": "2.0.0"}
 
 
-for router in (auth_router, library_router, playlist_router, queue_router, search_router, acquire_router, seed_router, cache_router, status_router):
+for router in (auth_router, library_router, playlist_router, queue_router, search_router, acquire_router, seed_router, cache_router, status_router, crud_router):
     app.include_router(router, prefix=settings.api_prefix)
