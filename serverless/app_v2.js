@@ -12,9 +12,20 @@ async function authenticated(env, request) {
   return !!await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`).bind(hash, Math.floor(Date.now() / 1000)).first();
 }
 
+async function clearAllViaEntry(request, env, ctx) {
+  // Keep the canonical implementation in entry.js. This explicit delegation
+  // guarantees that the route is handled before library/asset routing.
+  return entry.fetch(request, env, ctx);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/v1/admin/clear-all" && request.method === "POST") {
+      return clearAllViaEntry(request, env, ctx);
+    }
+
     if (url.pathname === "/api/v1/apple-music/import" && request.method === "POST") return json({ ok: true, deferred: true, message: "Library import is handled by /library/seed" });
     if (url.pathname === "/api/v1/library/backfill-metadata" && request.method === "POST") {
       if (!(await authenticated(env, request))) return json({ error: "Authentication required" }, 401);
