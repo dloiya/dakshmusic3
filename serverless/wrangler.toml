@@ -15,7 +15,8 @@ GITHUB_OWNER = "dloiya"
 GITHUB_REPO = "dakshmusic3"
 
 [triggers]
-crons = ["*/1 * * * *"]
+# Metadata maintenance only. Top Cache is populated explicitly from Settings.
+crons = ["*/15 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
