@@ -1,0 +1,57 @@
+name: V2 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python -m compileall -q app
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-react
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend-react/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate D1 schema
+        run: |
+          python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect(':memory:')
+          db.executescript(open('db/schema.sql', encoding='utf-8').read())
+          tables = {r[0] for r in db.execute("select name from sqlite_master where type='table'")}
+          required = {'tracks','albums','playlist_entries','queue_entries','queue_state','acquisition_jobs','cache_objects','sessions','import_jobs'}
+          missing = required - tables
+          if missing:
+              raise SystemExit(f'missing tables: {sorted(missing)}')
+          print('D1 schema valid')
+          PY
