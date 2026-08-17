@@ -1,10 +1,16 @@
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from .config import get_settings
 from .core.errors import AppError
+from .api.auth import router as auth_router
+from .api.library import router as library_router
+from .api.playlist import router as playlist_router
+from .api.queue import router as queue_router
+from .api.search import router as search_router
+from .api.acquire import router as acquire_router
+from .api.seed import router as seed_router
+from .api.cache import router as cache_router
 from .api.status import router as status_router
 
 
@@ -35,4 +41,5 @@ async def health():
     return {"ok": True, "service": settings.app_name, "version": "2.0.0"}
 
 
-app.include_router(status_router, prefix=settings.api_prefix)
+for router in (auth_router, library_router, playlist_router, queue_router, search_router, acquire_router, seed_router, cache_router, status_router):
+    app.include_router(router, prefix=settings.api_prefix)
