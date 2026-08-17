@@ -26,14 +26,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m py_compile workers/acquire/acquire.py workers/acquire/resolve_apple.py
-      - run: python - <<'PY'
-        import pathlib
-        import yaml
-        for path in pathlib.Path('.github/workflows').glob('*.yml'):
-            yaml.safe_load(path.read_text(encoding='utf-8'))
-        print('Workflow YAML valid')
-        PY
       - run: pip install pyyaml --quiet
+      - run: |
+          python - <<'PY'
+          import pathlib
+          import yaml
+          for path in pathlib.Path('.github/workflows').glob('*.yml'):
+              yaml.safe_load(path.read_text(encoding='utf-8'))
+          print('Workflow YAML valid')
+          PY
 
   frontend:
     runs-on: ubuntu-latest
