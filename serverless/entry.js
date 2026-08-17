@@ -70,7 +70,7 @@ async function withPlayerDetails(response) {
   if (!type.includes("text/html")) return response;
   const html = await response.text();
   if (html.includes("queue-handler.js")) return new Response(html, response);
-  const injected = html.replace(/<\/body>/i, '<script src="/player-details.js"></script><script src="/queue-handler.js"></script><script src="/acquisition-ui.js"></script><script src="/player-ui.js"></script></body>');
+  const injected = html.replace(/<\/body>/i, '<script src="/player-details.js"></script><script src="/queue-handler.js?v=queue-api-v3"></script><script src="/acquisition-ui.js"></script><script src="/player-ui.js"></script></body>');
   const headers = new Headers(response.headers);
   headers.set("content-type", "text/html; charset=utf-8");
   return new Response(injected, { status: response.status, statusText: response.statusText, headers });
@@ -84,15 +84,15 @@ export default {
     const audioUploadMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)\/audio$/);
     if (audioUploadMatch && (req.method === "PUT" || req.method === "POST")) return uploadAudioCallback(env, req, audioUploadMatch[1]);
 
-    if (path === "/api/v1/queue/current") {
+    if (path === "/api/v1/queue/current" || path === "/api/v1/playback-queue/current") {
       const response = await handleQueueCurrent(req, env);
       if (response) return response;
     }
-    if (path === "/api/v1/queue/reorder") {
+    if (path === "/api/v1/queue/reorder" || path === "/api/v1/playback-queue/reorder") {
       const response = await handleQueueReorder(req, env);
       if (response) return response;
     }
-    if (path === "/api/v1/queue" || /^\/api\/v1\/queue\/\d+$/.test(path)) {
+    if (path === "/api/v1/queue" || path === "/api/v1/playback-queue" || /^\/api\/v1\/(?:queue|playback-queue)\/\d+$/.test(path)) {
       const response = await handleQueue(req, env);
       if (response) return response;
     }
