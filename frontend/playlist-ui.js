@@ -66,99 +66,60 @@
   async function startSearchQueue() {
     const list = filtered();
     if (!list.length) return;
-
     if (searchQueue.length || audio.src) {
       const clear = confirm("Clear the current queue and play the search results?\n\nOK = clear queue\nCancel = append search results");
       if (clear) searchQueue = [];
     }
-
     searchQueue.push(...list);
     queueIndex = searchQueue.length - list.length + selected;
-
-    if (window.__playSearchQueue) {
-      window.__playSearchQueue(searchQueue, queueIndex);
-    } else {
-      const track = searchQueue[queueIndex];
-      if (track?.id != null) {
-        audio.src = `${API}/playback/${encodeURIComponent(track.id)}`;
-        audio.play().catch(() => {});
-      }
+    if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
+    else if (searchQueue[queueIndex]?.id != null) {
+      audio.src = `${API}/playback/${encodeURIComponent(searchQueue[queueIndex].id)}`;
+      audio.play().catch(() => {});
     }
     showPlayer();
   }
 
   center?.addEventListener("click", e => {
     if (document.getElementById("view-playlist")?.classList.contains("active") && query.trim()) {
-      e.stopImmediatePropagation();
-      startSearchQueue();
+      e.stopImmediatePropagation(); startSearchQueue();
     }
   }, true);
-
   next?.addEventListener("click", e => {
     if (searchQueue.length && document.getElementById("view-nowplaying")?.classList.contains("active")) {
       e.stopImmediatePropagation();
-      if (queueIndex < searchQueue.length - 1) {
-        queueIndex++;
-        if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
-      }
+      if (queueIndex < searchQueue.length - 1) { queueIndex++; if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex); }
     }
   }, true);
-
   prev?.addEventListener("click", e => {
     if (searchQueue.length && document.getElementById("view-nowplaying")?.classList.contains("active")) {
       e.stopImmediatePropagation();
-      if (queueIndex > 0) {
-        queueIndex--;
-        if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
-      }
+      if (queueIndex > 0) { queueIndex--; if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex); }
     }
   }, true);
-
   audio.addEventListener("ended", () => {
-    if (searchQueue.length && queueIndex < searchQueue.length - 1) {
-      queueIndex++;
-      if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex);
-    }
+    if (searchQueue.length && queueIndex < searchQueue.length - 1) { queueIndex++; if (window.__playSearchQueue) window.__playSearchQueue(searchQueue, queueIndex); }
   });
-
   search.addEventListener("input", () => { query = search.value; selected = 0; render(); });
-  search.addEventListener("keydown", e => {
-    if (e.key === "Escape") { search.value = ""; query = ""; selected = 0; render(); }
-  });
+  search.addEventListener("keydown", e => { if (e.key === "Escape") { search.value = ""; query = ""; selected = 0; render(); } });
 
   const footer = document.createElement("footer");
   footer.className = "app-footer";
-  footer.innerHTML = `
-    <div id="acquisitionPanel" class="acquisition-panel">
-      <button type="button" id="acquisitionToggle" aria-expanded="false">Acquisition status <span>▸</span></button>
-      <div id="acquisitionBody" hidden><div class="acq-empty">No acquisition activity.</div></div>
-    </div>`;
+  footer.innerHTML = `<div id="acquisitionPanel" class="acquisition-panel"><button type="button" id="acquisitionToggle" aria-expanded="false">Acquisition status <span>▸</span></button><div id="acquisitionBody" hidden><div class="acq-empty">No acquisition activity.</div></div></div>`;
   document.querySelector(".device")?.appendChild(footer);
-
   document.getElementById("acquisitionToggle")?.addEventListener("click", () => {
-    const body = document.getElementById("acquisitionBody");
-    const button = document.getElementById("acquisitionToggle");
-    const open = body.hidden;
-    body.hidden = !open;
-    button.setAttribute("aria-expanded", String(open));
-    button.querySelector("span").textContent = open ? "▾" : "▸";
-    if (open) refreshJobs();
+    const body = document.getElementById("acquisitionBody"); const button = document.getElementById("acquisitionToggle"); const open = body.hidden;
+    body.hidden = !open; button.setAttribute("aria-expanded", String(open)); button.querySelector("span").textContent = open ? "▾" : "▸"; if (open) refreshJobs();
   });
 
   async function refreshJobs() {
     const body = document.getElementById("acquisitionBody");
     if (!body || body.hidden) return;
     try {
-      const r = await fetch(`${API}/jobs/status`, { credentials: "include" });
+      const r = await fetch(`${API}/acquisitions?limit=100`, { credentials: "include" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      const jobs = data.jobs || [];
-      body.innerHTML = jobs.length ? jobs.map(j => `
-        <div class="acq-row ${j.status === "failed" ? "failed" : ""}">
-          <div><strong>${esc(j.title || "Unknown track")}</strong><small>${esc(j.artist || "")}</small></div>
-          <span>${esc(j.status || "unknown")}</span>
-          ${j.error ? `<div class="acq-error">${esc(j.error)}</div>` : ""}
-        </div>`).join("") : `<div class="acq-empty">No acquisition activity.</div>`;
+      const data = await r.json(); const jobs = data.items || [];
+      body.innerHTML = jobs.length ? jobs.map(j => `<div class="acq-row ${j.status === "failed" ? "failed" : ""}"><div><strong>${esc(j.title || "Unknown track")}</strong><small>${esc(j.artist || "")}</small></div><span>${esc(j.status || "unknown")}</span>${j.error ? `<div class="acq-error">${esc(j.error)}</div>` : ""}</div>`).join("") : `<div class="acq-empty">No acquisition activity.</div>`;
     } catch (e) {
       body.innerHTML = `<div class="acq-error">Unable to load acquisition status: ${esc(e.message)}</div>`;
     }
@@ -166,22 +127,8 @@
 
   function injectStyle() {
     const s = document.createElement("style");
-    s.textContent = `
-      .playlist-search{margin:5px 8px 2px;width:calc(100% - 16px);padding:6px 8px;border:1px solid #b9bdb8;border-radius:5px;background:#fff;color:var(--screen-ink);font:inherit;font-size:11px;outline:none}
-      .playlist-search:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-      .playlist-search-status{font-size:9px;color:var(--screen-sub);padding:1px 9px 3px}
-      .app-footer{width:100%;margin-top:10px;padding-top:6px;border-top:1px solid rgba(0,0,0,.08)}
-      .acquisition-panel{width:100%;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif}
-      #acquisitionToggle{width:100%;border:1px solid #cfcdc7;border-radius:6px;background:#e9e7e2;color:#5b625d;padding:5px 8px;text-align:left;font:600 10px inherit;cursor:pointer}
-      #acquisitionBody{margin-top:4px;background:#f2f1ee;border:1px solid #cfcdc7;border-radius:6px;padding:5px;max-height:140px;overflow:auto}
-      .menu li.sel{background:linear-gradient(180deg,var(--sel-a),var(--sel-b));color:var(--sel-ink)}
-      .menu li.sel .sub{color:#dbe6f5}
-      .acq-row{position:relative;padding:5px 4px;border-bottom:1px solid rgba(0,0,0,.07);font-size:9.5px;color:#1b1f1c}.acq-row:last-child{border-bottom:0}.acq-row strong{display:block}.acq-row small{display:block;color:#5b625d;margin-top:1px}.acq-row>span{position:absolute;right:4px;top:6px;font-size:8.5px;color:#5b625d}.acq-row.failed>span{color:#b34c3c}.acq-error{margin-top:4px;color:#b34c3c;white-space:pre-wrap;word-break:break-word}.acq-empty{padding:7px;text-align:center;color:#5b625d;font-size:9px}
-    `;
+    s.textContent = `.playlist-search{margin:5px 8px 2px;width:calc(100% - 16px);padding:6px 8px;border:1px solid #b9bdb8;border-radius:5px;background:#fff;color:var(--screen-ink);font:inherit;font-size:11px;outline:none}.playlist-search:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}.playlist-search-status{font-size:9px;color:var(--screen-sub);padding:1px 9px 3px}.app-footer{width:100%;margin-top:10px;padding-top:6px;border-top:1px solid rgba(0,0,0,.08)}.acquisition-panel{width:100%;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif}#acquisitionToggle{width:100%;border:1px solid #cfcdc7;border-radius:6px;background:#e9e7e2;color:#5b625d;padding:5px 8px;text-align:left;font:600 10px inherit;cursor:pointer}#acquisitionBody{margin-top:4px;background:#f2f1ee;border:1px solid #cfcdc7;border-radius:6px;padding:5px;max-height:140px;overflow:auto}.menu li.sel{background:linear-gradient(180deg,var(--sel-a),var(--sel-b));color:var(--sel-ink)}.menu li.sel .sub{color:#dbe6f5}.acq-row{position:relative;padding:5px 4px;border-bottom:1px solid rgba(0,0,0,.07);font-size:9.5px;color:#1b1f1c}.acq-row:last-child{border-bottom:0}.acq-row strong{display:block}.acq-row small{display:block;color:#5b625d;margin-top:1px}.acq-row>span{position:absolute;right:4px;top:6px;font-size:8.5px;color:#5b625d}.acq-row.failed>span{color:#b34c3c}.acq-error{margin-top:4px;color:#b34c3c;white-space:pre-wrap;word-break:break-word}.acq-empty{padding:7px;text-align:center;color:#5b625d;font-size:9px}`;
     document.head.appendChild(s);
   }
-
-  injectStyle();
-  loadPlaylist();
-  setInterval(() => { loadPlaylist(); refreshJobs(); }, 5000);
+  injectStyle(); loadPlaylist(); setInterval(() => { loadPlaylist(); refreshJobs(); }, 5000);
 })();
