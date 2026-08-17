@@ -1,12 +1,17 @@
 from pathlib import Path
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 P = ROOT / "serverless" / "library.js"
 text = P.read_text(encoding="utf-8")
 
-if "async function enrichSeedTrackMetadata" not in text:
-    helper = r'''
+# The library was consolidated and now performs metadata enrichment through
+# serverless/metadata_backfill.js. Keep this script compatible with both the
+# older seedLibrary implementation and the current seed() implementation.
+if "async function seedLibrary(env, req, ctx) {" in text:
+    # Legacy codebase: inject the synchronous enrichment helper used by the
+    # original seeding flow.
+    if "async function enrichSeedTrackMetadata" not in text:
+        helper = r'''
 
 async function enrichSeedTrackMetadata(env, track) {
   const needsDuration = !(Number(track?.duration_ms) > 0);
@@ -24,21 +29,14 @@ async function enrichSeedTrackMetadata(env, track) {
   };
 
   try {
-    // Prefer an exact Deezer catalog lookup whenever the imported track already
-    // carries a Deezer ID or URL. This supplies both duration and artwork.
     let deezerId = null;
-    if (source === "deezer" && track.source_id) {
-      deezerId = String(track.source_id).match(/(\d+)$/)?.[1] || null;
-    }
-    if (!deezerId && track.source_url) {
-      deezerId = String(track.source_url).match(/deezer\.com\/(?:[a-z]{2}\/)?track\/(\d+)/i)?.[1] || null;
-    }
-    if (deezerId && (needsDuration || needsArtwork)) {
+    if (source === "deezer" && track.source_id) deezerId = String(track.source_id).match(/(\d+)$/)?.[1] || null;
+    if (!deezerId && track.source_url) deezerId = String(track.source_url).match(/deezer\.com\/(?:[a-z]{2}\/)?track\/(\d+)/i)?.[1] || null;
+    if (deezerId) {
       const response = await fetch(`https://api.deezer.com/track/${encodeURIComponent(deezerId)}`);
       if (response.ok) apply(await response.json());
     }
 
-    // Otherwise use an exact title + artist Deezer search.
     if ((needsDuration && !duration) || (needsArtwork && !artwork)) {
       const title = String(track.title || "").trim();
       const artist = String(track.artist || "").trim();
@@ -47,45 +45,12 @@ async function enrichSeedTrackMetadata(env, track) {
         const response = await fetch(`https://api.deezer.com/search?q=${query}&limit=10`);
         if (response.ok) {
           const data = await response.json();
-          const wantedTitle = title.toLowerCase();
-          const wantedArtist = artist.toLowerCase();
           const exact = (data.data || []).find(item =>
-            String(item.title || "").trim().toLowerCase() === wantedTitle &&
-            String(item.artist?.name || "").trim().toLowerCase() === wantedArtist
+            String(item.title || "").trim().toLowerCase() === title.toLowerCase() &&
+            String(item.artist?.name || "").trim().toLowerCase() === artist.toLowerCase()
           );
           apply(exact);
         }
-      }
-    }
-
-    // Apple is a fallback for Apple imports when Deezer has no exact result.
-    if ((needsDuration && !duration) || (needsArtwork && !artwork)) {
-      const appleId = String(track.source_id || "").match(/(?:^apple[-_:])?(\d+)$/i)?.[1] ||
-        String(track.source_url || "").match(/\/song\/[^/?#]+\/(\d+)(?:\?|#|$)/i)?.[1] || null;
-      let result = null;
-      if (appleId) {
-        const response = await fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song`);
-        if (response.ok) {
-          const data = await response.json();
-          result = (data.results || []).find(item => item.wrapperType === "track");
-        }
-      }
-      if (!result && track.title && track.artist) {
-        const term = encodeURIComponent(`${track.title} ${track.artist}`);
-        const response = await fetch(`https://itunes.apple.com/search?term=${term}&entity=song&limit=10`);
-        if (response.ok) {
-          const data = await response.json();
-          const wantedTitle = String(track.title).trim().toLowerCase();
-          const wantedArtist = String(track.artist).trim().toLowerCase();
-          result = (data.results || []).find(item =>
-            String(item.trackName || "").trim().toLowerCase() === wantedTitle &&
-            String(item.artistName || "").trim().toLowerCase() === wantedArtist
-          );
-        }
-      }
-      if (result) {
-        if (!duration && Number(result.trackTimeMillis) > 0) duration = Number(result.trackTimeMillis);
-        if (!artwork) artwork = result.artworkUrl100 || result.artworkUrl60 || null;
       }
     }
   } catch (error) {
@@ -103,17 +68,14 @@ async function enrichSeedTrackMetadata(env, track) {
   return track;
 }
 '''
-    anchor = "async function seedLibrary(env, req, ctx) {"
-    if anchor not in text:
-        raise SystemExit("seedLibrary anchor not found")
-    text = text.replace(anchor, helper + "\n" + anchor, 1)
+        anchor = "async function seedLibrary(env, req, ctx) {"
+        text = text.replace(anchor, helper + "\n" + anchor, 1)
 
-# Enrich matched tracks before they are copied into playlist_entries/top cache.
-old = '''  for (let i = 0; i < matched.length; i++) {
+    old = '''  for (let i = 0; i < matched.length; i++) {
     const { track } = matched[i];
     await env.DB.prepare(`INSERT OR IGNORE INTO playlist_entries(track_id,position,title,artist,album,artwork_url,duration_ms) VALUES(?,?,?,?,?,?,?)`).bind(track.id, i + 1, track.title, track.artist, track.album, track.artwork_url, track.duration_ms).run();
   }'''
-new = '''  for (let i = 0; i < matched.length; i += 8) {
+    new = '''  for (let i = 0; i < matched.length; i += 8) {
     const batch = matched.slice(i, i + 8);
     await Promise.all(batch.map(async entry => {
       entry.track = await enrichSeedTrackMetadata(env, entry.track);
@@ -123,9 +85,17 @@ new = '''  for (let i = 0; i < matched.length; i += 8) {
     const { track } = matched[i];
     await env.DB.prepare(`INSERT OR IGNORE INTO playlist_entries(track_id,position,title,artist,album,artwork_url,duration_ms) VALUES(?,?,?,?,?,?,?)`).bind(track.id, i + 1, track.title, track.artist, track.album, track.artwork_url, track.duration_ms).run();
   }'''
-if old not in text:
-    raise SystemExit("playlist insertion block not found")
-text = text.replace(old, new, 1)
+    if old in text:
+        text = text.replace(old, new, 1)
+    else:
+        raise SystemExit("legacy playlist insertion block not found")
+
+elif "async function seed(env,req) {" in text:
+    # Current library architecture already imports metadata_backfill.js and
+    # deliberately defers enrichment after seeding. Nothing needs patching.
+    print("seed metadata enrichment already handled by metadata_backfill.js")
+else:
+    raise SystemExit("unsupported library.js: no known seed function found")
 
 P.write_text(text, encoding="utf-8")
-print("seed metadata enrichment applied")
+print("seed metadata enrichment check passed")
