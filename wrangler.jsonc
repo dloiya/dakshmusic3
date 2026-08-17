@@ -24,7 +24,7 @@
       "bucket_name": "dakshmusic3-audio"
     }
   ],
-  "secrets": {
-    "required": ["DAKSH_ADMIN_PASSWORD", "DAKSH_GITHUB_TOKEN", "DAKSH_WORKER_CALLBACK_SECRET"]
+  "observability": {
+    "enabled": true
   }
 }
