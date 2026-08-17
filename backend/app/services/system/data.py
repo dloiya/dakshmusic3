@@ -5,17 +5,14 @@ import io
 import uuid
 
 from ...config import Settings
-from ...connectors.cloudflare.bindings import get_worker_env
 from ...connectors.cloudflare.r2 import R2Client
 from ...connectors.deezer import DeezerConnector
 from ...repositories import D1Repository, LibraryRepository
 
 
 class DataService:
-    # Seed only performs bounded CSV normalization/dedupe and D1 writes.
-    # Metadata network work is handled asynchronously by the Queue consumer.
     SEED_CHUNK_SIZE = 10
-    METADATA_CONCURRENCY = 1
+    METADATA_CHUNK_SIZE = 1
 
     def __init__(self, settings: Settings, db: D1Repository):
         self.settings = settings
@@ -79,29 +76,18 @@ class DataService:
                 return best[1]
         return None
 
-    async def _enrich_metadata(self, tracks):
-        if not tracks:
-            return 0
-        track = tracks[0]
+    async def enrich_metadata_chunk(self, rows):
+        if not rows or len(rows) > self.METADATA_CHUNK_SIZE:
+            raise ValueError(f"metadata chunk must contain 1-{self.METADATA_CHUNK_SIZE} rows")
+        track = self._track(rows[0])
         metadata = await self._metadata_for_track(track)
         if not metadata:
-            return 0
+            return {"processed": 1, "enriched": 0}
         await self.db.batch([(
             """UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), album_name=COALESCE(NULLIF(album_name,''),?), updated_at=CURRENT_TIMESTAMP WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)))""",
             [metadata.get("duration_ms"), metadata.get("artwork_url"), metadata.get("source"), metadata.get("source_id"), metadata.get("source_url"), metadata.get("album_name"), track.get("isrc"), track.get("isrc"), track["title"], track["artist"]],
         )])
-        return 1
-
-    async def _enqueue_metadata(self, tracks):
-        env = get_worker_env()
-        queue = getattr(env, "METADATA_QUEUE", None) if env is not None else None
-        if queue is None:
-            return 0
-        queued = 0
-        for track in tracks:
-            await queue.send(track)
-            queued += 1
-        return queued
+        return {"processed": 1, "enriched": 1}
 
     async def _insert_import_rows(self, job_id, rows):
         tracks = []
@@ -122,8 +108,7 @@ class DataService:
             statements.append(("""INSERT INTO tracks(title,artist,album_name,isrc,cache_requested) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""", [track["title"],track["artist"],track["album"],track["isrc"],track["cache"],track["isrc"],track["isrc"],track["title"],track["artist"],track["album"]]))
         if statements:
             await self.db.batch(statements)
-        queued = await self._enqueue_metadata(tracks)
-        return len(tracks), failed, queued
+        return len(tracks), failed
 
     async def start_import(self, filename, total):
         job_id = str(uuid.uuid4())
@@ -136,7 +121,7 @@ class DataService:
         job = await self.db.one("SELECT * FROM import_jobs WHERE id=?", [job_id])
         if not job:
             raise ValueError("Import job not found")
-        imported, failed, queued = await self._insert_import_rows(job_id, rows)
+        imported, failed = await self._insert_import_rows(job_id, rows)
         processed = job["processed_rows"] + len(rows)
         total_imported = job["imported_rows"] + imported
         total_failed = job["failed_rows"] + failed
@@ -146,7 +131,7 @@ class DataService:
             await self.db.execute("UPDATE import_jobs SET status='complete',processed_rows=?,imported_rows=?,failed_rows=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed,total_imported,total_failed,job_id])
         else:
             await self.db.execute("UPDATE import_jobs SET processed_rows=?,imported_rows=?,failed_rows=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed,total_imported,total_failed,job_id])
-        return {"ok":True,"job_id":job_id,"processed":processed,"total":job["total_rows"],"imported":total_imported,"failed":total_failed,"metadata_queued":queued,"complete":done}
+        return {"ok":True,"job_id":job_id,"processed":processed,"total":job["total_rows"],"imported":total_imported,"failed":total_failed,"complete":done}
 
     async def import_csv(self, filename: str, content: bytes):
         rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
