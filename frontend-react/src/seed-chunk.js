@@ -1,4 +1,4 @@
-const CHUNK_SIZE = 1
+const CHUNK_SIZE = 10
 
 function parseCsv(text) {
   const rows = []
@@ -59,9 +59,9 @@ async function importInChunks(file) {
     if (!response.ok) throw new Error(payload.detail || payload.error || `Import failed (${response.status})`)
     jobId = payload.job_id
     processed += chunk.length
-    updateProgress(processed, rows.length, `${processed.toLocaleString()} / ${rows.length.toLocaleString()} · metadata ${payload.metadata_enriched ? 'filled' : 'not found'} `)
+    updateProgress(processed, rows.length, `${processed.toLocaleString()} / ${rows.length.toLocaleString()} · metadata queued ${payload.metadata_queued ?? 0}`)
   }
-  updateProgress(rows.length, rows.length, `Import complete · ${rows.length.toLocaleString()} rows`)
+  updateProgress(rows.length, rows.length, `Import complete · ${rows.length.toLocaleString()} rows · metadata queued for background processing`)
   setTimeout(() => document.getElementById('seed-progress')?.remove(), 700)
 }
 
