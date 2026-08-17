@@ -19,3 +19,6 @@ class D1Repository:
 
     async def execute(self, sql: str, params: list[Any] | None = None):
         await self.db.query(sql, params)
+
+    async def batch(self, statements: list[tuple[str, list[Any] | None]]):
+        await self.db.batch(statements)
