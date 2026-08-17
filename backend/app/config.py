@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     app_name: str = "dakshmusic3"
     environment: str = "development"
     api_prefix: str = "/api/v1"
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = ""
     cloudflare_account_id: str = ""
     cloudflare_d1_database_id: str = "3f384751-424c-4628-ac18-384c068afd8b"
     cloudflare_api_token: str = ""
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     worker_public_url: str = ""
     worker_callback_secret: str = ""
     spotiflac_api_url: str = ""
+    deezer_api_url: str = "https://api.deezer.com"
     model_config = SettingsConfigDict(env_file=".env", env_prefix="DAKSH_", extra="ignore")
 
 
@@ -58,7 +59,4 @@ def get_settings() -> Settings:
             raise RuntimeError("CALLBACK_SECRET must be a unique 32+ character secret in production")
         if not settings.github_token:
             raise RuntimeError("GITHUB_TOKEN is required in production")
-        origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
-        if not origins or any("localhost" in o or "127.0.0.1" in o for o in origins):
-            raise RuntimeError("Production CORS_ORIGINS must contain only real application origins")
     return settings
