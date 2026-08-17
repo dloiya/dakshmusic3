@@ -25,6 +25,7 @@ CREATE TABLE tracks (
   isrc TEXT,
   duration_ms INTEGER,
   artwork_url TEXT,
+  metadata_json TEXT,
   storage_key TEXT UNIQUE,
   storage_status TEXT NOT NULL DEFAULT 'missing' CHECK(storage_status IN ('missing','queued','available','failed')),
   play_count INTEGER NOT NULL DEFAULT 0,
@@ -115,6 +116,7 @@ CREATE TABLE import_jobs (
 CREATE INDEX idx_tracks_artist ON tracks(artist);
 CREATE INDEX idx_tracks_album ON tracks(album_id);
 CREATE INDEX idx_tracks_source ON tracks(source, source_id);
+CREATE INDEX idx_tracks_isrc ON tracks(isrc);
 CREATE INDEX idx_playlist_position ON playlist_entries(position);
 CREATE INDEX idx_queue_key_position ON queue_entries(queue_key, position);
 CREATE INDEX idx_acquisition_status ON acquisition_jobs(status, created_at);
