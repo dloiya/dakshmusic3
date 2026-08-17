@@ -126,8 +126,8 @@
 
   function playTrack(track,listContext,mode=null){nowPlayingTrack=track;nowPlayingList=listContext;nowPlayingMode=mode;window.__dakshQueuePlayTrack(track,listContext,mode);}
 
-  function openClearAllData(){push({key:"clearall",title:"Clear All Data",kind:"field",onGo:runClearAllData});setTimeout(()=>document.getElementById("clearAllPassword")?.focus(),50);}
-  async function runClearAllData(){const pwEl=document.getElementById("clearAllPassword"),status=document.getElementById("clearAllStatus"),password=pwEl.value;if(!password){status.textContent="Enter your password to confirm.";return;}status.textContent="Clearing all data…";try{const res=await clearAllData(password);pwEl.value="";status.textContent=`Cleared. Removed ${res.r2_objects_deleted} cached audio file(s).`;nowPlayingTrack=null;audio.pause();audio.removeAttribute("src");toast("All data cleared");}catch(e){status.textContent=e.message;} }
+  async function runClearAllData(){const pwEl=document.getElementById("clearAllPassword"),status=document.getElementById("clearAllStatus"),password=pwEl?.value?.trim()||"";if(!status)return;if(!password){status.textContent="Enter your password to confirm.";return;}const button=document.getElementById("clearAllGo");if(button?.dataset.busy==="1")return;if(button){button.dataset.busy="1";button.disabled=true;}status.textContent="Clearing all data…";try{const res=await clearAllData(password);if(pwEl)pwEl.value="";status.textContent=`Cleared. Removed ${Number(res.r2_objects_deleted||0)} cached audio file(s).`;nowPlayingTrack=null;audio.pause();audio.removeAttribute("src");toast("All data cleared");}catch(e){status.textContent=e?.message||"Clear All Data failed.";}finally{if(button){button.dataset.busy="0";button.disabled=false;}}}
+  function openClearAllData(){push({key:"clearall",title:"Clear All Data",kind:"field",onGo:runClearAllData});setTimeout(()=>{const input=document.getElementById("clearAllPassword");input?.focus();const button=document.getElementById("clearAllGo");if(button&&!button.dataset.appBound){button.dataset.appBound="1";button.addEventListener("click",e=>{e.preventDefault();e.stopPropagation();runClearAllData();});}input?.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();e.stopPropagation();runClearAllData();}});},0);}
 
   function openAppleImport(){push({key:"appleimport",title:"Apple Music",kind:"field",onGo:runAppleImport});}
   function playlistUrlId(url){try{const u=new URL(url),parts=u.pathname.split("/").filter(Boolean);return parts[parts.length-1]||null;}catch{return null;}}
@@ -139,6 +139,7 @@
   function showLoggedIn(){ loginWrap.classList.add("hidden"); statusbar.style.display="flex"; openHome(); }
   document.getElementById("loginBtn")?.addEventListener("click",async()=>{const p=document.getElementById("password").value,err=document.getElementById("loginErr");try{await login(p);err.textContent="";showLoggedIn();}catch(e){err.textContent=e.message;}});
   document.getElementById("password")?.addEventListener("keydown",e=>{if(e.key==="Enter")document.getElementById("loginBtn")?.click();});
+  document.addEventListener("click",e=>{const button=e.target?.closest?.("#clearAllGo");if(!button||button.dataset.appDelegated==="1")return;button.dataset.appDelegated="1";e.preventDefault();e.stopPropagation();runClearAllData();});
   document.getElementById("btnMenu")?.addEventListener("click",()=>pop());
   document.getElementById("btnCenter")?.addEventListener("click",()=>selectCurrent());
   document.getElementById("btnPrev")?.addEventListener("click",()=>{ if(window.__dakshQueue?.previous) window.__dakshQueue.previous(); });
