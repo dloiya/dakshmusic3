@@ -23,19 +23,19 @@ class SeedChunk(BaseModel):
 async def seed(file:UploadFile=File(...),service:DataService=Depends(get_data)):
     if not (file.filename or "").lower().endswith(".csv"): raise HTTPException(415,"CSV file required")
     content=await file.read()
-    # Keep the legacy endpoint bounded. The production UI uses /seed/chunk so large
-    # files never spend an entire Worker invocation parsing and importing.
     if len(content)>2_000_000:
         raise HTTPException(413,"CSV is too large for a single request; use the chunked importer")
     return await service.import_csv(file.filename or "library.csv",content)
 
 @router.post("/chunk")
 async def seed_chunk(payload:SeedChunk,service:DataService=Depends(get_data)):
-    if not payload.rows or len(payload.rows)>100: raise HTTPException(400,"chunk must contain 1-100 rows")
+    if not payload.rows or len(payload.rows)>DataService.SEED_CHUNK_SIZE:
+        raise HTTPException(400,f"chunk must contain 1-{DataService.SEED_CHUNK_SIZE} rows")
     try:
         job_id=payload.job_id or await service.start_import(payload.filename,payload.total)
         return await service.import_chunk(job_id,payload.rows,payload.done)
-    except ValueError as exc: raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404,str(exc)) from exc
 
 @router.get("/{job_id}")
 async def seed_status(job_id:str,service:DataService=Depends(get_data)):
