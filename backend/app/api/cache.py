@@ -4,7 +4,7 @@ from ..config import Settings, get_settings
 from ..repositories import AcquisitionRepository, CacheRepository, D1Repository, LibraryRepository
 from ..services.acquisition.acquire import AcquisitionService
 from ..services.cache.service import CacheService
-from .deps import get_db, require_session
+from .deps import get_db
 
 router=APIRouter(prefix="/cache",tags=["cache"])
 
@@ -14,9 +14,9 @@ def get_cache(settings:Settings=Depends(get_settings),db:D1Repository=Depends(ge
     return CacheService(CacheRepository(db),jobs,acquisition)
 
 @router.get("/status")
-async def cache_status(service:CacheService=Depends(get_cache),_:str=Depends(require_session)):
+async def cache_status(service:CacheService=Depends(get_cache)):
     return await service.status()
 
 @router.post("/populate")
-async def populate_cache(limit:int=100,service:CacheService=Depends(get_cache),_:str=Depends(require_session)):
+async def populate_cache(limit:int=100,service:CacheService=Depends(get_cache)):
     return await service.populate(limit)
