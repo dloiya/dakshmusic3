@@ -24,6 +24,22 @@
       "bucket_name": "dakshmusic3-audio"
     }
   ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "METADATA_QUEUE",
+        "queue": "dakshmusic3-metadata"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "dakshmusic3-metadata",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 1
+      }
+    ]
+  },
   "secrets": {
     "required": [
       "APP_SECRET",
