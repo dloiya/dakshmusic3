@@ -1,5 +1,4 @@
 from functools import lru_cache
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +17,10 @@ class Settings(BaseSettings):
     r2_endpoint: str = ""
     session_secret: str = "change-me"
     admin_password: str = ""
+    github_token: str = ""
+    github_repo: str = "dloiya/dakshmusic3"
+    github_ref: str = "main"
+    acquire_workflow: str = "acquire-audio.yml"
     model_config = SettingsConfigDict(env_file=".env", env_prefix="DAKSH_", extra="ignore")
 
 
