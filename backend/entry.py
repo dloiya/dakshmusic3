@@ -17,8 +17,8 @@ class Default(WorkerEntrypoint):
         finally:
             reset_worker_env(token)
 
-    async def queue(self, batch):
-        token = set_worker_env(self.env)
+    async def queue(self, batch, env, ctx):
+        token = set_worker_env(env)
         try:
             settings = get_settings()
             db = D1Repository(D1Client(settings))
@@ -30,7 +30,6 @@ class Default(WorkerEntrypoint):
                     if enriched:
                         message.ack()
                     else:
-                        # Keep unresolved tracks retryable without blocking the whole import.
                         message.ack()
                 except Exception:
                     message.retry()
