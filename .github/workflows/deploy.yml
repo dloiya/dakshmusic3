@@ -25,11 +25,9 @@ jobs:
         run: |
           npm install --no-audit --no-fund
           npm run build
-      - name: Apply D1 migrations
-        run: npx wrangler@latest d1 migrations apply dakshmusic3 --remote
       - name: Install Python Worker tooling
-        working-directory: backend
-        run: uv sync
+        run: uv sync --dev
+      - name: Apply D1 migrations
+        run: uv run pywrangler d1 migrations apply dakshmusic3 --remote
       - name: Deploy Worker
-        working-directory: backend
         run: uv run pywrangler deploy
