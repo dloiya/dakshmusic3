@@ -17,6 +17,26 @@ class LibraryRepository:
     async def track(self, track_id):
         return await self.db.one("SELECT * FROM tracks WHERE id=?", [track_id])
 
+    async def upsert_track(self, data: dict):
+        source=data.get("source"); source_id=data.get("source_id")
+        if source and source_id:
+            existing=await self.db.one("SELECT id FROM tracks WHERE source=? AND source_id=?",[source,source_id])
+            if existing:
+                await self.update_track(existing["id"], data)
+                return await self.track(existing["id"])
+        fields=("title","artist","album_name","source","source_id","source_url","isrc","duration_ms","artwork_url","storage_key","storage_status","play_count","cache_requested")
+        values=[data.get(f) for f in fields]
+        await self.db.execute("INSERT INTO tracks("+",".join(fields)+") VALUES("+",".join("?" for _ in fields)+")",values)
+        if source and source_id:
+            return await self.db.one("SELECT * FROM tracks WHERE source=? AND source_id=?",[source,source_id])
+        return await self.db.one("SELECT * FROM tracks ORDER BY id DESC LIMIT 1")
+
+    async def update_track(self, track_id, data: dict):
+        allowed=("title","artist","album_name","source","source_id","source_url","isrc","duration_ms","artwork_url","storage_key","storage_status","play_count","cache_requested")
+        fields=[f for f in allowed if f in data]
+        if fields:
+            await self.db.execute(f"UPDATE tracks SET {','.join(f'{f}=?' for f in fields)},updated_at=CURRENT_TIMESTAMP WHERE id=?",[data[f] for f in fields]+[track_id])
+
     async def delete_track(self, track_id):
         await self.db.execute("DELETE FROM tracks WHERE id=?", [track_id])
 
