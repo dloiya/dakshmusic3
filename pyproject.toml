@@ -1,0 +1,17 @@
+[project]
+name = "dakshmusic3"
+version = "2.0.0"
+description = "dakshmusic3 FastAPI backend on Cloudflare Python Workers"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "pydantic-settings>=2.10,<3",
+  "httpx>=0.28,<1",
+  "python-multipart>=0.0.20,<1",
+]
+
+[dependency-groups]
+dev = [
+  "workers-py",
+  "workers-runtime-sdk",
+]
