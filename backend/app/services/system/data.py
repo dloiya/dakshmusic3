@@ -10,32 +10,53 @@ from ...repositories import D1Repository, LibraryRepository
 
 class DataService:
     def __init__(self, settings: Settings, db: D1Repository):
-        self.settings=settings; self.db=db; self.library=LibraryRepository(db); self.r2=R2Client(settings)
+        self.settings = settings; self.db = db; self.library = LibraryRepository(db); self.r2 = R2Client(settings)
 
     async def clear_all(self, include_audio=True):
-        deleted=await self.r2.delete_all() if include_audio else 0
+        deleted = await self.r2.delete_all() if include_audio else 0
         for table in ("cache_objects","acquisition_jobs","queue_entries","queue_state","playlist_entries","import_jobs","tracks","albums"):
             await self.db.execute(f"DELETE FROM {table}")
-        return {"ok":True,"database_cleared":True,"r2_objects_deleted":deleted}
+        return {"ok": True, "database_cleared": True, "r2_objects_deleted": deleted}
+
+    @staticmethod
+    def _v(row, *names):
+        values = {str(k).strip().lower().replace("_", "").replace(" ", ""): v for k, v in row.items()}
+        for name in names:
+            v = values.get(name.lower().replace("_", "").replace(" ", ""))
+            if v is not None and str(v).strip(): return str(v).strip()
+        return None
+
+    @classmethod
+    def _track(cls, row):
+        title = cls._v(row,"title","track_title","track_name","song_title","song","name") or "Unknown"
+        artist = cls._v(row,"artist","artist_name","artists","track_artist","song_artist") or "Unknown"
+        album = cls._v(row,"album_name","album","album_title")
+        source = cls._v(row,"source","provider","service")
+        source_id = cls._v(row,"source_id","track_id","spotify_id","deezer_id","youtube_id","yt_id","id")
+        raw_duration = cls._v(row,"duration_ms","duration","length_ms")
+        try: duration = int(float(raw_duration)) if raw_duration else None
+        except (ValueError, TypeError): duration = None
+        cache = cls._v(row,"100cache","cache","top_cache") or ""
+        return {
+            "title": title, "artist": artist, "album": album, "source": source, "source_id": source_id,
+            "source_url": cls._v(row,"source_url","url","track_url"), "isrc": cls._v(row,"isrc"),
+            "duration": duration, "artwork": cls._v(row,"artwork_url","artwork","cover_url","album_art"),
+            "cache": int(cache.lower() in {"1","true","yes","y"})
+        }
 
     async def _insert_import_rows(self, job_id, rows):
-        statements=[]; valid=0; failed=0
+        statements=[]; seen=set(); failed=0
         for row in rows:
             try:
-                norm={str(k).strip().lower().replace("_","").replace(" ",""):v for k,v in row.items()}
-                cache_value=norm.get("100cache",norm.get("cache",""))
-                raw_duration=row.get("duration_ms") or row.get("Duration_ms") or row.get("duration") or ""
-                try: duration=int(float(raw_duration)) if raw_duration else None
-                except (ValueError,TypeError): duration=None
-                title=(row.get("title") or row.get("Title") or row.get("name") or "Unknown").strip()
-                artist=(row.get("artist") or row.get("Artist") or "Unknown").strip()
-                album=row.get("album") or row.get("Album")
+                t=self._track(row)
+                key=("id",t["source"].lower(),t["source_id"]) if t["source"] and t["source_id"] else ("text",t["title"].casefold(),t["artist"].casefold(),(t["album"] or "").casefold())
+                if key in seen: continue
+                seen.add(key)
                 statements.append(("""INSERT INTO tracks(title,artist,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,cache_requested)
-VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(title,artist,album_name) DO UPDATE SET source=excluded.source,source_id=excluded.source_id,source_url=excluded.source_url,isrc=excluded.isrc,duration_ms=excluded.duration_ms,artwork_url=excluded.artwork_url,cache_requested=excluded.cache_requested,updated_at=CURRENT_TIMESTAMP""",[title,artist,album,row.get("source"),row.get("source_id") or row.get("id"),row.get("source_url") or row.get("url"),row.get("isrc") or row.get("ISRC"),duration,row.get("artwork_url") or row.get("artwork"),int(str(cache_value).strip().lower() in {"1","true","yes","y"})]))
-                valid+=1
+SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (source IS NOT NULL AND source=? AND source_id IS NOT NULL AND source_id=?) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""",[t["title"],t["artist"],t["album"],t["source"],t["source_id"],t["source_url"],t["isrc"],t["duration"],t["artwork"],t["cache"],t["source"],t["source_id"],t["title"],t["artist"],t["album"]]))
             except Exception: failed+=1
         if statements: await self.db.batch(statements)
-        return valid,failed
+        return len(seen), failed
 
     async def start_import(self, filename, total):
         job_id=str(uuid.uuid4())
@@ -46,10 +67,9 @@ VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(title,artist,album_name) DO UPDATE SET s
         job=await self.db.one("SELECT * FROM import_jobs WHERE id=?",[job_id])
         if not job: raise ValueError("Import job not found")
         imported,failed=await self._insert_import_rows(job_id,rows)
-        processed=job["processed_rows"]+len(rows)
-        total_imported=job["imported_rows"]+imported
-        total_failed=job["failed_rows"]+failed
+        processed=job["processed_rows"]+len(rows); total_imported=job["imported_rows"]+imported; total_failed=job["failed_rows"]+failed
         if done:
+            await self.db.execute("DELETE FROM playlist_entries WHERE id NOT IN (SELECT MIN(id) FROM playlist_entries GROUP BY track_id)")
             await self.db.execute("""INSERT INTO playlist_entries(track_id,position)
 SELECT t.id,COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1
 FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL""")
