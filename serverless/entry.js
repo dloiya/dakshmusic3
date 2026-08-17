@@ -1,104 +1,11 @@
 import worker from "./worker.js";
 import { handleQueue, handleQueueCurrent, handleQueueReorder } from "./queue.js";
-
-const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(data), {
-  status,
-  headers: { "content-type": "application/json; charset=utf-8", ...extra },
-});
-
-function cookie(req) {
-  return (req.headers.get("Cookie") || "").match(/(?:^|;\s*)music_session=([^;]+)/)?.[1] || null;
-}
-
-async function sha256(text) {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(d)].map(x => x.toString(16).padStart(2, "0")).join("");
-}
-
-async function requireAuth(env, req) {
-  const token = cookie(req);
-  if (!token || !env.DB) return false;
-  const row = await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`).bind(await sha256(token), Math.floor(Date.now() / 1000)).first();
-  return !!row;
-}
-
-async function listAcquisitions(env, req) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-  const url = new URL(req.url);
-  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
-  const status = url.searchParams.get("status");
-  const sql = status
-    ? `SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id WHERE j.status=? ORDER BY datetime(j.created_at) DESC LIMIT ?`
-    : `SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id ORDER BY datetime(j.created_at) DESC LIMIT ?`;
-  const result = status ? await env.DB.prepare(sql).bind(status, limit).all() : await env.DB.prepare(sql).bind(limit).all();
-  return json({ items: result.results || [], limit });
-}
-
-async function acquisitionSummary(env, req) {
-  if (!(await requireAuth(env, req))) return json({ error: "Authentication required" }, 401);
-  const result = await env.DB.prepare(`SELECT status,COUNT(*) AS count FROM download_jobs GROUP BY status`).all();
-  const counts = {};
-  for (const row of result.results || []) counts[row.status] = Number(row.count || 0);
-  return json({ counts, active: (counts.queued || 0) + (counts.dispatched || 0) + (counts.running || 0) });
-}
-
-async function uploadAudioCallback(env, req, jobId) {
-  const supplied = req.headers.get("X-Callback-Secret") || "";
-  const expected = String(env.CALLBACK_SECRET || "");
-  if (!expected || supplied.length !== expected.length) return json({ error: "Unauthorized" }, 401);
-  let mismatch = 0;
-  for (let i = 0; i < expected.length; i++) mismatch |= supplied.charCodeAt(i) ^ expected.charCodeAt(i);
-  if (mismatch !== 0) return json({ error: "Unauthorized" }, 401);
-  const job = await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(jobId).first();
-  if (!job) return json({ error: "Job not found" }, 404);
-  const url = new URL(req.url);
-  const provider = url.searchParams.get("provider") || null;
-  const format = url.searchParams.get("format") || "flac";
-  const contentType = req.headers.get("content-type") || (format === "mp3" ? "audio/mpeg" : "audio/flac");
-  const storageKey = `tracks/${job.track_id}.${format}`;
-  await env.AUDIO_BUCKET.put(storageKey, req.body, { httpMetadata: { contentType } });
-  await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(provider, storageKey, format, contentType, jobId).run();
-  if (job.kind === "general") {
-    await env.DB.prepare(`INSERT OR REPLACE INTO general_cache(track_id,drive_file_id,last_accessed_at) VALUES(?,?,CURRENT_TIMESTAMP)`).bind(job.track_id, storageKey).run();
-    await env.DB.prepare(`DELETE FROM general_cache WHERE track_id NOT IN (SELECT track_id FROM general_cache ORDER BY datetime(last_accessed_at) DESC LIMIT 25)`).run();
-  }
-  return json({ ok: true, storage_key: storageKey });
-}
-
-async function withPlayerDetails(response) {
-  const type = response.headers.get("content-type") || "";
-  if (!type.includes("text/html")) return response;
-  const html = await response.text();
-  if (html.includes("queue-handler.js")) return new Response(html, response);
-  const injected = html.replace(/<\/body>/i, '<script src="/player-details.js"></script><script src="/queue-handler.js?v=queue-api-v3"></script><script src="/acquisition-ui.js"></script><script src="/player-ui.js"></script></body>');
-  const headers = new Headers(response.headers);
-  headers.set("content-type", "text/html; charset=utf-8");
-  return new Response(injected, { status: response.status, statusText: response.statusText, headers });
-}
-
-export default {
-  async fetch(req, env, ctx) {
-    const url = new URL(req.url);
-    const path = url.pathname;
-
-    const audioUploadMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)\/audio$/);
-    if (audioUploadMatch && (req.method === "PUT" || req.method === "POST")) return uploadAudioCallback(env, req, audioUploadMatch[1]);
-
-    if (path === "/api/v1/queue/current" || path === "/api/v1/playback-queue/current") {
-      const response = await handleQueueCurrent(req, env);
-      if (response) return response;
-    }
-    if (path === "/api/v1/queue/reorder" || path === "/api/v1/playback-queue/reorder") {
-      const response = await handleQueueReorder(req, env);
-      if (response) return response;
-    }
-    if (path === "/api/v1/queue" || path === "/api/v1/playback-queue" || /^\/api\/v1\/(?:queue|playback-queue)\/\d+$/.test(path)) {
-      const response = await handleQueue(req, env);
-      if (response) return response;
-    }
-
-    if ((path === "/api/v1/acquisitions" || path === "/api/v1/jobs") && req.method === "GET") return listAcquisitions(env, req);
-    if (path === "/api/v1/acquisitions/summary" && req.method === "GET") return acquisitionSummary(env, req);
-    return withPlayerDetails(await worker.fetch(req, env, ctx));
-  },
-};
+const json=(data,status=200,extra={})=>new Response(JSON.stringify(data),{status,headers:{"content-type":"application/json",...extra}});
+function cookie(req){return(req.headers.get("Cookie")||"").match(/(?:^|;\s*)music_session=([^;]+)/)?.[1]||null;}
+async function sha256(text){const d=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(text));return[...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,"0")).join("");}
+async function requireAuth(env,req){const token=cookie(req);if(!token||!env.DB)return false;const row=await env.DB.prepare(`SELECT id_hash FROM sessions WHERE id_hash=? AND expires_at>?`).bind(await sha256(token),Math.floor(Date.now()/1000)).first();return!!row;}
+async function listAcquisitions(env,req){if(!(await requireAuth(env,req)))return json({error:"Authentication required"},401);const url=new URL(req.url),limit=Math.min(200,Math.max(1,Number(url.searchParams.get("limit")||100))),status=url.searchParams.get("status");const sql=status?`SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id WHERE j.status=? ORDER BY datetime(j.created_at) DESC LIMIT ?`:`SELECT j.id AS job_id,j.track_id,j.kind,j.status,j.provider,j.drive_file_id,j.format,j.mime_type,j.error,j.created_at,j.updated_at,t.title,t.artist,t.album,t.artwork_url,t.duration_ms,t.source,t.source_url FROM download_jobs j LEFT JOIN tracks t ON t.id=j.track_id ORDER BY datetime(j.created_at) DESC LIMIT ?`;const result=status?await env.DB.prepare(sql).bind(status,limit).all():await env.DB.prepare(sql).bind(limit).all();return json({items:result.results||[],limit});}
+async function acquisitionSummary(env,req){if(!(await requireAuth(env,req)))return json({error:"Authentication required"},401);const result=await env.DB.prepare(`SELECT status,COUNT(*) AS count FROM download_jobs GROUP BY status`).all(),counts={};for(const row of result.results||[])counts[row.status]=Number(row.count||0);return json({counts,active:(counts.queued||0)+(counts.dispatched||0)+(counts.running||0)});}
+async function uploadAudioCallback(env,req,jobId){const supplied=req.headers.get("X-Callback-Secret")||"",expected=String(env.CALLBACK_SECRET||"");if(!expected||supplied.length!==expected.length)return json({error:"Unauthorized"},401);let mismatch=0;for(let i=0;i<expected.length;i++)mismatch|=supplied.charCodeAt(i)^expected.charCodeAt(i);if(mismatch!==0)return json({error:"Unauthorized"},401);const job=await env.DB.prepare(`SELECT * FROM download_jobs WHERE id=?`).bind(jobId).first();if(!job)return json({error:"Job not found"},404);const url=new URL(req.url),provider=url.searchParams.get("provider")||null,format=url.searchParams.get("format")||"flac",contentType=req.headers.get("content-type")||(format==="mp3"?"audio/mpeg":"audio/flac"),storageKey=`tracks/${job.track_id}.${format}`;await env.AUDIO_BUCKET.put(storageKey,req.body,{httpMetadata:{contentType}});await env.DB.prepare(`UPDATE download_jobs SET status='complete',provider=?,drive_file_id=?,format=?,mime_type=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(provider,storageKey,format,contentType,jobId).run();if(job.kind==="general"){await env.DB.prepare(`INSERT OR REPLACE INTO general_cache(track_id,drive_file_id,last_accessed_at) VALUES(?,?,CURRENT_TIMESTAMP)`).bind(job.track_id,storageKey).run();await env.DB.prepare(`DELETE FROM general_cache WHERE track_id NOT IN (SELECT track_id FROM general_cache ORDER BY datetime(last_accessed_at) DESC LIMIT 25)`).run();}return json({ok:true,storage_key:storageKey});}
+async function withPlayerDetails(response){const type=response.headers.get("content-type")||"";if(!type.includes("text/html"))return response;const html=await response.text();if(html.includes("queue-handler.js"))return new Response(html,response);const injected=html.replace(/<\/body>/i,'<script src="/player-details.js"></script><script src="/queue-handler.js?v=queue-api-v7"></script><script src="/acquisition-ui.js"></script><script src="/player-ui.js"></script></body>');const headers=new Headers(response.headers);headers.set("content-type","text/html; charset=utf-8");return new Response(injected,{status:response.status,statusText:response.statusText,headers});}
+export default {async fetch(req,env,ctx){const url=new URL(req.url),path=url.pathname;const audioUploadMatch=path.match(/^\/api\/v1\/jobs\/([^/]+)\/audio$/);if(audioUploadMatch&&(req.method==="PUT"||req.method==="POST"))return uploadAudioCallback(env,req,audioUploadMatch[1]);if(path==="/api/v1/queue/current"||path==="/api/v1/playback-queue/current"){const response=await handleQueueCurrent(req,env);if(response)return response;}if(path==="/api/v1/queue/reorder"||path==="/api/v1/playback-queue/reorder"){const response=await handleQueueReorder(req,env);if(response)return response;}if(path==="/api/v1/queue"||path==="/api/v1/playback-queue"||/^\/api\/v1\/(?:queue|playback-queue)\/\d+$/.test(path)){const response=await handleQueue(req,env);if(response)return response;}if((path==="/api/v1/acquisitions"||path==="/api/v1/jobs")&&req.method==="GET")return listAcquisitions(env,req);if(path==="/api/v1/acquisitions/summary"&&req.method==="GET")return acquisitionSummary(env,req);return withPlayerDetails(await worker.fetch(req,env,ctx));},};
