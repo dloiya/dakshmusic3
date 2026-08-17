@@ -1,5 +1,5 @@
-from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from .connectors.cloudflare.bindings import get_worker_env
 
 
 class Settings(BaseSettings):
@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="DAKSH_", extra="ignore")
 
 
-@lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    values={}
+    env=get_worker_env()
+    if env is not None:
+        mapping={
+            "DAKSH_ADMIN_PASSWORD":"admin_password","DAKSH_GITHUB_TOKEN":"github_token",
+            "DAKSH_WORKER_PUBLIC_URL":"worker_public_url","DAKSH_WORKER_CALLBACK_SECRET":"worker_callback_secret",
+            "DAKSH_SPOTIFLAC_API_URL":"spotiflac_api_url","DAKSH_CORS_ORIGINS":"cors_origins",
+            "DAKSH_ENVIRONMENT":"environment","DAKSH_SESSION_SECRET":"session_secret",
+        }
+        for name,field in mapping.items():
+            value=getattr(env,name,None)
+            if value is not None: values[field]=str(value)
+    return Settings(**values)
