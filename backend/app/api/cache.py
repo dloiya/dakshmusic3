@@ -1,18 +1,19 @@
 from __future__ import annotations
-
 from fastapi import APIRouter, Depends
+from ..config import Settings, get_settings
+from ..repositories import AcquisitionRepository, CacheRepository, D1Repository
 from ..services.cache.service import CacheService
-from ..services.store import Store
-from .deps import get_store, require_session
+from .deps import get_db, require_session
 
-router = APIRouter(prefix="/cache", tags=["cache"])
+router=APIRouter(prefix="/cache",tags=["cache"])
 
+def get_cache(settings:Settings=Depends(get_settings),db:D1Repository=Depends(get_db))->CacheService:
+    return CacheService(settings,CacheRepository(db),AcquisitionRepository(db))
 
 @router.get("/status")
-async def cache_status(store: Store = Depends(get_store), _: str = Depends(require_session)):
-    return await CacheService(store.settings, store).status()
-
+async def cache_status(service:CacheService=Depends(get_cache),_:str=Depends(require_session)):
+    return await service.status()
 
 @router.post("/populate")
-async def populate_cache(limit: int = 100, store: Store = Depends(get_store), _: str = Depends(require_session)):
-    return await CacheService(store.settings, store).populate(limit)
+async def populate_cache(limit:int=100,service:CacheService=Depends(get_cache),_:str=Depends(require_session)):
+    return await service.populate(limit)
