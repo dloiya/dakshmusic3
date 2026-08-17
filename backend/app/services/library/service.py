@@ -16,19 +16,12 @@ class LibraryService:
     async def create_track(self, data: dict):
         if not data.get("title") or not data.get("artist"):
             raise ValueError("title and artist are required")
-        # Creation/upsert remains in the persistence path until its dedicated write repository is added.
-        raise NotImplementedError("track creation repository migration pending")
+        return await self.repository.upsert_track(data)
 
     async def update_track(self, track_id: int, data: dict):
         if not await self.repository.track(track_id):
             raise ValueError("Track not found")
-        allowed = ("title", "artist", "album_name", "source", "source_id", "source_url", "isrc", "duration_ms", "artwork_url", "storage_key", "storage_status", "play_count", "cache_requested")
-        fields = [key for key in allowed if key in data]
-        if fields:
-            await self.repository.db.execute(
-                f"UPDATE tracks SET {','.join(f'{field}=?' for field in fields)},updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                [data[field] for field in fields] + [track_id],
-            )
+        await self.repository.update_track(track_id, data)
         return await self.repository.track(track_id)
 
     async def delete_track(self, track_id: int):
