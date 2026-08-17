@@ -1,4 +1,5 @@
-const CHUNK_SIZE = 10
+const SEED_CHUNK_SIZE = 10
+const METADATA_CHUNK_SIZE = 1
 
 function parseCsv(text) {
   const rows = []
@@ -42,27 +43,45 @@ function updateProgress(done, total, text) {
   document.getElementById('seed-progress-bar').style.width = `${pct}%`
 }
 
+async function postJson(url, body) {
+  const response = await fetch(url, { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body) })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload.detail || payload.error || `${url} failed (${response.status})`)
+  return payload
+}
+
 async function importInChunks(file) {
   const text = await file.text()
   const rows = parseCsv(text)
   if (!rows.length) throw new Error('CSV contains no data rows')
+
+  // Phase 1: finish the entire seed before any metadata work starts.
   let jobId = null
   let processed = 0
-  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + CHUNK_SIZE)
-    updateProgress(processed, rows.length, `Importing ${processed.toLocaleString()} / ${rows.length.toLocaleString()}…`)
-    const response = await fetch('/api/v1/seed/chunk', {
-      method: 'POST', headers: {'content-type': 'application/json'},
-      body: JSON.stringify({ filename: file.name, job_id: jobId, rows: chunk, total: rows.length, done: i + chunk.length >= rows.length })
+  for (let i = 0; i < rows.length; i += SEED_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + SEED_CHUNK_SIZE)
+    updateProgress(processed, rows.length, `Seeding ${processed.toLocaleString()} / ${rows.length.toLocaleString()}…`)
+    const payload = await postJson('/api/v1/seed/chunk', {
+      filename: file.name, job_id: jobId, rows: chunk, total: rows.length, done: i + chunk.length >= rows.length
     })
-    const payload = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(payload.detail || payload.error || `Import failed (${response.status})`)
     jobId = payload.job_id
     processed += chunk.length
-    updateProgress(processed, rows.length, `${processed.toLocaleString()} / ${rows.length.toLocaleString()} · metadata queued ${payload.metadata_queued ?? 0}`)
+    updateProgress(processed, rows.length, `Seeding ${processed.toLocaleString()} / ${rows.length.toLocaleString()}…`)
   }
-  updateProgress(rows.length, rows.length, `Import complete · ${rows.length.toLocaleString()} rows · metadata queued for background processing`)
-  setTimeout(() => document.getElementById('seed-progress')?.remove(), 700)
+
+  // Phase 2: metadata starts only after the final seed request succeeds.
+  let metadataDone = 0
+  let metadataFilled = 0
+  for (let i = 0; i < rows.length; i += METADATA_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + METADATA_CHUNK_SIZE)
+    const payload = await postJson('/api/v1/metadata/chunk', { rows: chunk })
+    metadataDone += chunk.length
+    metadataFilled += payload.enriched || 0
+    updateProgress(metadataDone, rows.length, `Metadata ${metadataDone.toLocaleString()} / ${rows.length.toLocaleString()} · filled ${metadataFilled.toLocaleString()}`)
+  }
+
+  updateProgress(rows.length, rows.length, `Import complete · ${rows.length.toLocaleString()} tracks · metadata filled ${metadataFilled.toLocaleString()}`)
+  setTimeout(() => document.getElementById('seed-progress')?.remove(), 1200)
 }
 
 document.addEventListener('change', event => {
