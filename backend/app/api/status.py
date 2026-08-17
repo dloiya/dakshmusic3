@@ -1,12 +1,12 @@
 from __future__ import annotations
 from fastapi import APIRouter, Depends
 from ..repositories import AcquisitionRepository, D1Repository
-from .deps import get_db, require_session
+from .deps import get_db
 
 router=APIRouter(prefix="/status",tags=["status"])
 
 @router.get("")
-async def status(db:D1Repository=Depends(get_db),_:str=Depends(require_session)):
+async def status(db:D1Repository=Depends(get_db)):
     return await AcquisitionRepository(db).status()
 
 @router.get("/health")
