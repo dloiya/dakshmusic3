@@ -33,3 +33,30 @@ class D1Client:
             raise RuntimeError(str(payload.get("errors") or "D1 query failed"))
         result = payload.get("result") or []
         return result[0].get("results") or [] if result else []
+
+    async def batch(self, statements: list[tuple[str, list[Any] | None]]) -> None:
+        """Execute many D1 statements as one native batch when running in Workers."""
+        env = get_worker_env()
+        db = getattr(env, "DB", None) if env is not None else None
+        if db is not None:
+            prepared = []
+            for sql, params in statements:
+                statement = db.prepare(sql)
+                if params:
+                    statement = statement.bind(*params)
+                prepared.append(statement)
+            if prepared:
+                await db.batch(prepared)
+            return
+
+        if not self.settings.cloudflare_account_id or not self.settings.cloudflare_d1_database_id or not self.settings.cloudflare_api_token:
+            raise RuntimeError("Cloudflare D1 is not configured")
+        base_url = f"https://api.cloudflare.com/client/v4/accounts/{self.settings.cloudflare_account_id}/d1/database/{self.settings.cloudflare_d1_database_id}/query"
+        headers = {"Authorization": f"Bearer {self.settings.cloudflare_api_token}", "Content-Type": "application/json"}
+        payload = [{"sql": sql, "params": params or []} for sql, params in statements]
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(base_url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+        if not result.get("success"):
+            raise RuntimeError(str(result.get("errors") or "D1 batch failed"))
