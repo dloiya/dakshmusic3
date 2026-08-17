@@ -1,5 +1,18 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE albums (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  artist TEXT NOT NULL,
+  source TEXT,
+  source_id TEXT,
+  artwork_url TEXT,
+  year INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(source, source_id)
+);
+
 CREATE TABLE tracks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
@@ -17,20 +30,8 @@ CREATE TABLE tracks (
   play_count INTEGER NOT NULL DEFAULT 0,
   cache_requested INTEGER NOT NULL DEFAULT 0 CHECK(cache_requested IN (0,1)),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE albums (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL,
-  artist TEXT NOT NULL,
-  source TEXT,
-  source_id TEXT,
-  artwork_url TEXT,
-  year INTEGER,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(source, source_id)
+  UNIQUE(title, artist, album_name)
 );
 
 CREATE TABLE playlist_entries (
