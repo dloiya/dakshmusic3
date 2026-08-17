@@ -1,9 +1,9 @@
 (() => {
   const API = "/api/v1";
   const QUEUE_API = "/api/v1/playback-queue";
-  const QUEUE_KEY = "daksh-queue-v14";
+  const QUEUE_KEY = "daksh-queue-v15";
   const CACHE_NAME = "device-audio-v1";
-  const esc = v => String(v ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
+  const esc = v => String(v ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;"," ":">","\"":"&quot;","'":"&#039;"}[c] || c));
   const nativeFetch = window.fetch.bind(window);
   let playlistResponseCache = null;
   let playlistCachePromise = null;
@@ -11,15 +11,13 @@
   window.fetch = async (input, init = {}) => {
     const reqUrl = typeof input === "string" ? input : input?.url || "";
     const method = String(init?.method || (typeof input !== "string" && input?.method) || "GET").toUpperCase();
-    let parsed;
-    try { parsed = new URL(reqUrl, location.origin); } catch { parsed = null; }
+    let parsed; try { parsed = new URL(reqUrl, location.origin); } catch { parsed = null; }
     const isPlaylistGet = parsed?.pathname === `${API}/playlist` && method === "GET";
-    const isPlaylistMutation = parsed?.pathname === `${API}/playlist` && method !== "GET";
-    if (isPlaylistMutation) invalidatePlaylistCache();
+    if (parsed?.pathname === `${API}/playlist` && method !== "GET") invalidatePlaylistCache();
     if (!isPlaylistGet) return nativeFetch(input, init);
     if (playlistResponseCache) return playlistResponseCache.clone();
     if (playlistCachePromise) return (await playlistCachePromise).clone();
-    playlistCachePromise = nativeFetch(input, init).then(async response => { if (response.ok) playlistResponseCache = response.clone(); return response; }).finally(() => { playlistCachePromise = null; });
+    playlistCachePromise = nativeFetch(input, init).then(r => { if (r.ok) playlistResponseCache = r.clone(); return r; }).finally(() => { playlistCachePromise = null; });
     return (await playlistCachePromise).clone();
   };
   async function api(path, options = {}) { const res = await nativeFetch(path, { credentials:"include", ...options, headers:{"Content-Type":"application/json", ...(options.headers||{})} }); const text = await res.text(); let data={}; try{data=text?JSON.parse(text):{}}catch{} if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`); return data; }
@@ -33,19 +31,30 @@
   async function setCurrent(index){return apply(await api(`${QUEUE_API}/current`,{method:"POST",body:JSON.stringify({index})}),state);}
   async function remove(index){return apply(await api(`${QUEUE_API}/${encodeURIComponent(index)}`,{method:"DELETE"}),state);}
   async function reorder(from,to){return apply(await api(`${QUEUE_API}/reorder`,{method:"POST",body:JSON.stringify({from,to})}),state);}
-  async function deviceCached(id){if(!( "caches" in window)||id==null)return false;try{const c=await caches.open(CACHE_NAME);return!!await c.match(`${location.origin}${API}/playback/${encodeURIComponent(id)}`);}catch{return false;}}
+  async function deviceCached(id){if(!("caches"in window)||id==null)return false;try{const c=await caches.open(CACHE_NAME);return!!await c.match(`${location.origin}${API}/playback/${encodeURIComponent(id)}`);}catch{return false;}}
   async function cacheFlags(items){return Promise.all(items.map(async t=>({...t,device_cached:await deviceCached(t.track_id??t.id)})));}
   async function playIndex(index){if(index<0||index>=state.items.length)return null;const d=await setCurrent(index);const track=d.items[d.current_index];if(!track)return null;window.__dakshNowPlayingTrack=track;window.__dakshNowPlayingQueueIndex=d.current_index;await playTrackDirect(track,d.items,d.mode);return track;}
   async function playCurrent(){if(!state.items.length)return null;let index=state.current_index;if(!Number.isInteger(index)||index<0||index>=state.items.length)index=0;return playIndex(index);}
   async function next(){try{await sync();}catch{}return state.current_index+1<state.items.length?playIndex(state.current_index+1):null;}
   async function previous(){try{await sync();}catch{}return state.current_index>0?playIndex(state.current_index-1):null;}
   function sameQueue(items){if(!Array.isArray(items)||items.length!==state.items.length)return false;return items.every((x,i)=>String(x.id??x.track_id)===String(state.items[i].id??state.items[i].track_id));}
-  async function ensureSourceQueue(track,list,mode){if(!Array.isArray(list)||!list.length)return state;const id=String(track?.id??track?.track_id);const index=list.findIndex(x=>String(x?.id??x?.track_id)===id);if(index<0)return state;if(mode==="playlist"||mode==="album"){
-    // Always send the complete source plus the selected track ID. The server is authoritative
-    // and slices the queue at the selected track, so stale client state can never recreate the playlist.
-    return replace(list,index,mode,track?.id??track?.track_id);
+  async function ensureSourceQueue(track,list,mode){
+    if(!Array.isArray(list)||!list.length)return state;
+    const id=String(track?.id??track?.track_id);
+    const index=list.findIndex(x=>String(x?.id??x?.track_id)===id);
+    if(index<0)return state;
+    if(mode==="playlist"||mode==="album"){
+      // Once the server has positioned the source queue, navigation passes that
+      // already-positioned queue back in. Do NOT re-slice/rewrite it.
+      if(sameQueue(list)&&state.mode===mode)return state;
+      // Initial source selection: send the complete source and selected ID.
+      // The server trims it to selected track -> end, preserving the full
+      // remaining queue (e.g. exactly 35 songs when 35 remain).
+      return replace(list,index,mode,track?.id??track?.track_id);
+    }
+    if(!sameQueue(list)||state.mode!==mode||state.current_index!==index)return replace(list,index,mode||"manual");
+    return state;
   }
-  if(!sameQueue(list)||state.mode!==mode||state.current_index!==index)return replace(list,index,mode||"manual");return state;}
   async function playTrackDirect(track,list,mode){const queued=await ensureSourceQueue(track,list,mode);const actualTrack=(mode==="playlist"||mode==="album")&&queued.items.length?queued.items[queued.current_index>=0?queued.current_index:0]:track;const id=actualTrack?.id??actualTrack?.track_id;if(id==null)throw new Error("Track has no ID");try{await api(`/tracks/${encodeURIComponent(id)}/acquire`,{method:"POST"});}catch{}const audio=document.getElementById("audio");if(!audio)throw new Error("Audio player unavailable");audio.src=`${API}/playback/${encodeURIComponent(id)}`;await audio.play();return queued;}
   function sourceLabel(){return state.mode==="album"?"Album":state.mode==="playlist"?"Playlist":state.mode==="search"?"Search":"Queue";}
   async function renderOverlay(){let overlay=document.getElementById("dakshQueueOverlay");if(!overlay){overlay=document.createElement("div");overlay.id="dakshQueueOverlay";overlay.innerHTML=`<div class="dq-head"><button id="dqBack" class="dq-back" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/><path d="M9 12h11"/></svg></button><div class="dq-title"><b>Queue</b><small id="dqSource"></small></div></div><div id="dqBody"></div><div class="dq-foot"><button id="dqClear">Clear</button></div>`;document.getElementById("screen")?.appendChild(overlay);overlay.querySelector("#dqBack").onclick=()=>{overlay.remove();document.getElementById("btnMenu")?.click();};overlay.querySelector("#dqClear").onclick=async()=>{if(confirm("Clear the queue?")){await clear();await renderOverlay();}};}const body=overlay.querySelector("#dqBody");const items=await cacheFlags(state.items);overlay.querySelector("#dqSource").textContent=state.items.length?` · ${sourceLabel()}`:"";body.innerHTML=items.length?items.map((t,i)=>`<div class="dq-row ${i===state.current_index?"cur":""} ${t.device_cached?"device-ready":""}" data-i="${i}"><div class="dq-main"><span class="dq-pos">${i+1}</span><div class="dq-text"><b>${esc(t.title||"Untitled")}</b><small>${esc(t.artist||"")}${t.album?` · ${esc(t.album)}`:""}</small><div class="dq-badges">${t.server_available?`<span class="dq-badge server">SERVER</span>`:""}${t.device_cached?`<span class="dq-badge device">ON DEVICE</span>`:""}</div></div></div><span class="dq-state">${t.device_cached?"Ready offline":""}</span></div>`).join(""): `<div class="dq-empty">Queue is empty</div>`;body.querySelectorAll(".dq-row").forEach(row=>row.onclick=()=>playIndex(Number(row.dataset.i)));}
