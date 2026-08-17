@@ -1,12 +1,12 @@
-"""Generic CRUD and destructive system operations."""
-from fastapi import APIRouter
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from ..services.store import Store
+from .deps import get_store, require_session
 
 router = APIRouter(prefix="/crud", tags=["crud"])
 
-@router.get("/health")
-async def crud_health():
-    return {"ok": True}
 
 @router.delete("/all")
-async def clear_all():
-    return {"accepted": True}
+async def clear_all(include_audio: bool = True, store: Store = Depends(get_store), _: str = Depends(require_session)):
+    return await store.clear_all(include_audio)
