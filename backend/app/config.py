@@ -15,8 +15,9 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     r2_bucket: str = "dakshmusic3-audio"
     r2_endpoint: str = ""
-    session_secret: str = "change-me"
-    admin_password: str = ""
+    session_secret: str = ""
+    password_hash: str = ""
+    password_salt: str = ""
     github_token: str = ""
     github_repo: str = "dloiya/dakshmusic3"
     github_ref: str = "main"
@@ -32,14 +33,16 @@ def get_settings() -> Settings:
     env = get_worker_env()
     if env is not None:
         mapping = {
-            "DAKSH_ADMIN_PASSWORD": "admin_password",
-            "DAKSH_GITHUB_TOKEN": "github_token",
+            "APP_SECRET": "session_secret",
+            "CALLBACK_SECRET": "worker_callback_secret",
+            "GITHUB_TOKEN": "github_token",
+            "PASSWORD_HASH": "password_hash",
+            "PASSWORD_SALT": "password_salt",
+            "ENVIRONMENT": "environment",
+            "CORS_ORIGINS": "cors_origins",
             "DAKSH_WORKER_PUBLIC_URL": "worker_public_url",
-            "DAKSH_WORKER_CALLBACK_SECRET": "worker_callback_secret",
-            "DAKSH_SPOTIFLAC_API_URL": "spotiflac_api_url",
-            "DAKSH_CORS_ORIGINS": "cors_origins",
-            "DAKSH_ENVIRONMENT": "environment",
-            "DAKSH_SESSION_SECRET": "session_secret",
+            "DEEZER_API": "deezer_api_url",
+            "SPOTIFLAC_API_URL": "spotiflac_api_url",
         }
         for name, field in mapping.items():
             value = getattr(env, name, None)
@@ -47,14 +50,14 @@ def get_settings() -> Settings:
                 values[field] = str(value)
     settings = Settings(**values)
     if settings.environment.lower() == "production":
-        if not settings.admin_password:
-            raise RuntimeError("DAKSH_ADMIN_PASSWORD is required in production")
-        if len(settings.admin_password) < 12:
-            raise RuntimeError("DAKSH_ADMIN_PASSWORD must be at least 12 characters in production")
-        if settings.session_secret == "change-me" or len(settings.session_secret) < 32:
-            raise RuntimeError("DAKSH_SESSION_SECRET must be a unique 32+ character secret in production")
+        if not settings.password_hash or not settings.password_salt:
+            raise RuntimeError("PASSWORD_HASH and PASSWORD_SALT are required in production")
+        if not settings.session_secret or len(settings.session_secret) < 32:
+            raise RuntimeError("APP_SECRET must be a unique 32+ character secret in production")
         if not settings.worker_callback_secret or len(settings.worker_callback_secret) < 32:
-            raise RuntimeError("DAKSH_WORKER_CALLBACK_SECRET must be a unique 32+ character secret in production")
+            raise RuntimeError("CALLBACK_SECRET must be a unique 32+ character secret in production")
+        if not settings.github_token:
+            raise RuntimeError("GITHUB_TOKEN is required in production")
         origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
         if not origins or any("localhost" in o or "127.0.0.1" in o for o in origins):
             raise RuntimeError("Production CORS_ORIGINS must contain only real application origins")
