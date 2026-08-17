@@ -1,5 +1,18 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE albums (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  artist TEXT NOT NULL,
+  source TEXT,
+  source_id TEXT,
+  artwork_url TEXT,
+  year INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(source, source_id)
+);
+
 CREATE TABLE tracks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
@@ -17,20 +30,8 @@ CREATE TABLE tracks (
   play_count INTEGER NOT NULL DEFAULT 0,
   cache_requested INTEGER NOT NULL DEFAULT 0 CHECK(cache_requested IN (0,1)),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE albums (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL,
-  artist TEXT NOT NULL,
-  source TEXT,
-  source_id TEXT,
-  artwork_url TEXT,
-  year INTEGER,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(source, source_id)
+  UNIQUE(title, artist, album_name)
 );
 
 CREATE TABLE playlist_entries (
@@ -41,7 +42,6 @@ CREATE TABLE playlist_entries (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(track_id)
 );
-
 CREATE TABLE queue_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   queue_key TEXT NOT NULL,
@@ -49,10 +49,8 @@ CREATE TABLE queue_entries (
   position INTEGER NOT NULL,
   added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(queue_key, position),
-  UNIQUE(queue_key, track_id)
+  UNIQUE(queue_key, position), UNIQUE(queue_key, track_id)
 );
-
 CREATE TABLE queue_state (
   queue_key TEXT PRIMARY KEY,
   current_index INTEGER NOT NULL DEFAULT -1,
@@ -60,7 +58,6 @@ CREATE TABLE queue_state (
   shuffle_enabled INTEGER NOT NULL DEFAULT 0 CHECK(shuffle_enabled IN (0,1)),
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE TABLE acquisition_jobs (
   id TEXT PRIMARY KEY,
   track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -73,7 +70,6 @@ CREATE TABLE acquisition_jobs (
   started_at TEXT,
   completed_at TEXT
 );
-
 CREATE TABLE cache_objects (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -88,14 +84,12 @@ CREATE TABLE cache_objects (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(track_id, scope, scope_id)
 );
-
 CREATE TABLE sessions (
   id_hash TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL
 );
-
 CREATE TABLE import_jobs (
   id TEXT PRIMARY KEY,
   filename TEXT NOT NULL,
