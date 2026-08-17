@@ -14,6 +14,16 @@ async def get_queue(key: str = "main", store: Store = Depends(get_store), _: str
     return {"ok": True, **await QueueService(store).get(key)}
 
 
+@router.post("/shuffle")
+async def shuffle_queue(key: str = "main", store: Store = Depends(get_store), _: str = Depends(require_session)):
+    return {"ok": True, **await QueueService(store).shuffle(key)}
+
+
+@router.patch("/state")
+async def update_queue_state(payload: dict[str, Any], key: str = "main", store: Store = Depends(get_store), _: str = Depends(require_session)):
+    return {"ok": True, **await QueueService(store).update_state(key, payload)}
+
+
 @router.post("/{track_id}")
 async def add_queue(track_id: int, key: str = "main", position: int | None = None, store: Store = Depends(get_store), _: str = Depends(require_session)):
     try:
@@ -33,13 +43,3 @@ async def remove_queue(entry_id: int, key: str = "main", store: Store = Depends(
 async def clear_queue(key: str = "main", store: Store = Depends(get_store), _: str = Depends(require_session)):
     await QueueService(store).clear(key)
     return {"ok": True}
-
-
-@router.post("/shuffle")
-async def shuffle_queue(key: str = "main", store: Store = Depends(get_store), _: str = Depends(require_session)):
-    return {"ok": True, **await QueueService(store).shuffle(key)}
-
-
-@router.patch("/state")
-async def update_queue_state(payload: dict[str, Any], key: str = "main", store: Store = Depends(get_store), _: str = Depends(require_session)):
-    return {"ok": True, **await QueueService(store).update_state(key, payload)}
