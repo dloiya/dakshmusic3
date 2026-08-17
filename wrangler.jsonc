@@ -26,12 +26,11 @@
   ],
   "secrets": {
     "required": [
-      "DAKSH_ENVIRONMENT",
-      "DAKSH_ADMIN_PASSWORD",
-      "DAKSH_SESSION_SECRET",
-      "DAKSH_WORKER_CALLBACK_SECRET",
-      "DAKSH_GITHUB_TOKEN",
-      "DAKSH_CORS_ORIGINS"
+      "APP_SECRET",
+      "CALLBACK_SECRET",
+      "GITHUB_TOKEN",
+      "PASSWORD_HASH",
+      "PASSWORD_SALT"
     ]
   },
   "observability": {
