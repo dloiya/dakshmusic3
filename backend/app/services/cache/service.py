@@ -1,29 +1,33 @@
 from __future__ import annotations
 
-from ..store import Store
-from ..acquisition.acquire import AcquisitionService
 from ...config import Settings
+from ...repositories import AcquisitionRepository, CacheRepository
+from ..acquisition.acquire import AcquisitionService
 
 
 class CacheService:
-    def __init__(self, settings: Settings, store: Store):
+    def __init__(self, settings: Settings, cache: CacheRepository, acquisition_repo: AcquisitionRepository):
         self.settings = settings
-        self.store = store
+        self.cache = cache
+        self.acquisition_repo = acquisition_repo
         self.acquisition = AcquisitionService(settings)
 
     async def status(self):
-        return await self.store.cache_status()
+        return await self.cache.status()
 
     async def populate(self, limit=100):
-        result = await self.store.populate_top_cache(limit)
-        dispatched = 0
-        for item in result["jobs"]:
-            if not item["created"]:
-                continue
-            try:
-                await self.acquisition.dispatch_job(item["job_id"], item["track_id"])
-                dispatched += 1
-            except Exception as exc:
-                await self.store.update_job(item["job_id"], "failed", str(exc))
-        result["dispatched"] = dispatched
-        return result
+        candidates = await self.cache.top_candidates(limit)
+        jobs=[]
+        dispatched=0
+        for track in candidates:
+            job_id, created = await self.acquisition_repo.create(track["id"])
+            item={"track_id":track["id"],"job_id":job_id,"created":created}
+            jobs.append(item)
+            if created:
+                try:
+                    await self.acquisition.dispatch_job(job_id, track["id"])
+                    dispatched += 1
+                    await self.acquisition_repo.update(job_id,"dispatched")
+                except Exception as exc:
+                    await self.acquisition_repo.update(job_id,"failed",str(exc))
+        return {"ok":True,"requested":len(candidates),"jobs":jobs,"dispatched":dispatched}
