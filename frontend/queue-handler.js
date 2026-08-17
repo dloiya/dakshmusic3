@@ -1,13 +1,13 @@
 (() => {
   const API = "/api/v1";
   const QUEUE_API = "/api/v1/playback-queue";
-  const QUEUE_KEY = "daksh-queue-v16";
+  const QUEUE_KEY = "daksh-queue-v17";
   const CACHE_NAME = "device-audio-v1";
   const esc = v => String(v ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
   const nativeFetch = window.fetch.bind(window);
   let playlistResponseCache = null, playlistCachePromise = null;
   const invalidatePlaylistCache = () => { playlistResponseCache = null; playlistCachePromise = null; };
-  window.fetch = async (input, init = {}) => { const reqUrl=typeof input==="string"?input:input?.url||""; const method=String(init?.method||(typeof input!=="string"&&input?.method)||"GET").toUpperCase(); let parsed; try{parsed=new URL(reqUrl,location.origin)}catch{parsed=null} const get=parsed?.pathname===`${API}/playlist`&&method==="GET"; if(parsed?.pathname===`${API}/playlist`&&method!=="GET")invalidatePlaylistCache(); if(!get)return nativeFetch(input,init); if(playlistResponseCache)return playlistResponseCache.clone(); if(playlistCachePromise)return(await playlistCachePromise).clone(); playlistCachePromise=nativeFetch(input,init).then(r=>{if(r.ok)playlistResponseCache=r.clone();return r}).finally(()=>{playlistCachePromise=null}); return(await playlistCachePromise).clone(); };
+  window.fetch = async (input, init = {}) => { const reqUrl=typeof input==="string"?input:input?.url||""; const method=String(init?.method||(typeof input!=="string"&&input?.method)||"GET").toUpperCase(); let parsed; try{parsed=new URL(reqUrl,location.origin)}catch{parsed=null} if(parsed?.pathname===`${API}/auth/login`&&method==="POST"){const response=await nativeFetch(input,init);if(response.ok)nativeFetch(`${API}/cache/top/ensure`,{method:"POST",credentials:"include"}).catch(()=>{});return response;} const get=parsed?.pathname===`${API}/playlist`&&method==="GET"; if(parsed?.pathname===`${API}/playlist`&&method!=="GET")invalidatePlaylistCache(); if(!get)return nativeFetch(input,init); if(playlistResponseCache)return playlistResponseCache.clone(); if(playlistCachePromise)return(await playlistCachePromise).clone(); playlistCachePromise=nativeFetch(input,init).then(r=>{if(r.ok)playlistResponseCache=r.clone();return r}).finally(()=>{playlistCachePromise=null}); return(await playlistCachePromise).clone(); };
   async function api(path,options={}){const res=await nativeFetch(path,{credentials:"include",...options,headers:{"Content-Type":"application/json",...(options.headers||{})}});const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch{}if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);return data;}
   let state={items:[],current_index:-1,mode:"manual"};
   const persist=()=>{try{localStorage.setItem(QUEUE_KEY,JSON.stringify(state))}catch{}};
