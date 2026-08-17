@@ -1,7 +1,7 @@
 (() => {
   const API = "/api/v1";
   const QUEUE_API = "/api/v1/playback-queue";
-  const QUEUE_KEY = "daksh-queue-v9";
+  const QUEUE_KEY = "daksh-queue-v10";
   const CACHE_NAME = "device-audio-v1";
   const esc = v => String(v ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
 
@@ -29,9 +29,6 @@
   async function sync() { return apply(await api(QUEUE_API)); }
 
   async function warmQueue(items) {
-    // Populate the server general_cache for the whole active queue. The
-    // acquisition endpoint is idempotent and deduplicates already cached or
-    // already-running jobs, so this can safely run in the background.
     const tracks = (items || []).filter(t => t && (t.id != null || t.track_id != null));
     await Promise.allSettled(tracks.map(async t => {
       const id = t.id ?? t.track_id;
@@ -44,8 +41,6 @@
     const idx = clean.length ? Math.max(0, Math.min(Number(current) || 0, clean.length - 1)) : -1;
     const d = await api(QUEUE_API, { method:"POST", body:JSON.stringify({ mode:"replace", items:clean, current_index:idx, playback_mode:mode }) });
     const result = apply(d, {items:clean, current_index:idx, mode});
-    // Start acquisition immediately instead of waiting until a later track
-    // is selected. This keeps general_cache populated for queue playback.
     warmQueue(result.items);
     return result;
   }
@@ -92,8 +87,6 @@
   }
 
   async function next() {
-    // Re-read the authoritative server queue before advancing so an ended
-    // event can never get stuck on a stale first-track state.
     try { await sync(); } catch {}
     return state.current_index + 1 < state.items.length ? playIndex(state.current_index + 1) : null;
   }
@@ -113,7 +106,23 @@
     const id = String(track?.id ?? track?.track_id);
     const index = list.findIndex(x => String(x?.id ?? x?.track_id) === id);
     if (index < 0) return state;
-    if (!sameQueue(list) || state.mode !== mode || state.current_index !== index) return replace(list, index, mode || "manual");
+
+    // A playlist/album is a SOURCE, not automatically the playback queue.
+    // When the user starts from a specific song, the queue begins at that
+    // song and contains only the remaining songs from that source. This
+    // prevents Queue from showing the first songs of the playlist when the
+    // user selected a later track.
+    if (mode === "playlist" || mode === "album") {
+      const remaining = list.slice(index);
+      if (!sameQueue(remaining) || state.mode !== mode || state.current_index !== 0) {
+        return replace(remaining, 0, mode);
+      }
+      return state;
+    }
+
+    if (!sameQueue(list) || state.mode !== mode || state.current_index !== index) {
+      return replace(list, index, mode || "manual");
+    }
     return state;
   }
 
@@ -121,9 +130,6 @@
     const queued = await ensureSourceQueue(track, list, mode);
     const id = track?.id ?? track?.track_id;
     if (id == null) throw new Error("Track has no ID");
-    // Ensure acquisition is queued before playback. If already cached, this
-    // returns immediately; otherwise the current and remaining queue tracks
-    // are already being warmed by replace().
     try { await api(`/tracks/${encodeURIComponent(id)}/acquire`, {method:"POST"}); } catch {}
     const audio = document.getElementById("audio");
     if (!audio) throw new Error("Audio player unavailable");
@@ -145,8 +151,6 @@
       document.getElementById("screen")?.appendChild(overlay);
       overlay.querySelector("#dqBack").onclick = () => {
         overlay.remove();
-        // MENU on the physical wheel is the app's real back/navigation action.
-        // Invoke it programmatically so Queue follows the same navigation stack.
         document.getElementById("btnMenu")?.click();
       };
       overlay.querySelector("#dqClear").onclick = async () => { if (confirm("Clear the queue?")) { await clear(); await renderOverlay(); } };
