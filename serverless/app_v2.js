@@ -56,17 +56,12 @@ export default {
 
   async scheduled(controller, env, ctx) {
     console.log("Cron metadata backfill fired", controller.cron, controller.scheduledTime);
-
-    // Await the metadata job itself. Cron invocations wait for the returned promise;
-    // relying only on waitUntil made failures invisible and made the job look idle.
     try {
       await runMetadataBackfill(env);
     } catch (error) {
       console.error("Scheduled metadata backfill failed", error?.stack || error);
       throw error;
     }
-
-    // Cache warming is independent and may continue in the background.
     ctx.waitUntil(Promise.resolve().then(() => libraryScheduled(env)).catch(error => {
       console.error("Scheduled cache warm failed", error?.stack || error);
     }));
