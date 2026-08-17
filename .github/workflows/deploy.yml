@@ -38,8 +38,8 @@ jobs:
           grep -q 'handleAcquisitionRoute' serverless/entry.js
           grep -q 'api/v1/acquisitions' serverless/entry.js
           grep -q 'api/v1/acquisitions/summary' serverless/entry.js
-          grep -q '/jobs/status' frontend/playlist-ui.js
-          grep -q 'tracks/.*acquire' serverless/acquisition_route.js
+          grep -q '/acquisitions?limit=' frontend/playlist-ui.js
+          grep -qE 'tracks/[^[:space:]]*/acquire' serverless/acquisition_route.js
           echo "Consolidated acquisition, seed metadata, duration, library routing, and UI verified"
 
       - name: Install Wrangler
