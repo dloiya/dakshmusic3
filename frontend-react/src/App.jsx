@@ -8,7 +8,28 @@ export default function App() {
   const [authenticated,setAuthenticated]=useState(false),[password,setPassword]=useState(''),[tab,setTab]=useState('Library'),[tracks,setTracks]=useState([]),[searchResults,setSearchResults]=useState([]),[jobs,setJobs]=useState({active:0,jobs:[],counts:{}}),[query,setQuery]=useState(''),[error,setError]=useState(''),[modal,setModal]=useState(null)
   const load=async()=>{try{const session=await auth.session();setAuthenticated(session.authenticated);if(!session.authenticated)return;const [library,status]=await Promise.all([api('/library/tracks?limit=500'),api('/status')]);setTracks(library.items||[]);setJobs(status);setError('')}catch(e){setError(e.message)}}
   useEffect(()=>{load()},[])
-  useEffect(()=>{if(!authenticated)return;const timer=setInterval(()=>api('/status').then(setJobs).catch(()=>{}),2000);return()=>clearInterval(timer)},[authenticated])
+  useEffect(()=>{
+    if(!authenticated)return
+    let timer
+    let stopped=false
+    const poll=async()=>{
+      if(stopped||document.visibilityState==='hidden')return
+      try {
+        const status=await api('/status')
+        if(!stopped)setJobs(status)
+        // Once there are no active workers, slow the next check down further.
+        schedule(status.active>0?5000:15000)
+      } catch {
+        // Do not create a rapid retry loop when the API is unavailable.
+        schedule(15000)
+      }
+    }
+    const schedule=(delay)=>{clearTimeout(timer);if(!stopped)timer=setTimeout(poll,delay)}
+    const onVisibility=()=>{if(document.visibilityState==='visible')schedule(1000)}
+    document.addEventListener('visibilitychange',onVisibility)
+    schedule(5000)
+    return()=>{stopped=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisibility)}
+  },[authenticated])
   const login=async e=>{e.preventDefault();try{await auth.login(password);setPassword('');setAuthenticated(true);await load()}catch(e){setError(e.message)}}
   const doSearch=async()=>{if(!query.trim()){setSearchResults([]);return}try{setSearchResults((await api(`/search?q=${encodeURIComponent(query)}&limit=30`)).items||[]);setError('')}catch(e){setError(e.message)}}
   const addTrack=async track=>{try{const result=await api('/library/tracks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(track)});await api(`/queue/${result.id}`,{method:'POST'});setTab('Queue');await load()}catch(e){setError(e.message)}}
