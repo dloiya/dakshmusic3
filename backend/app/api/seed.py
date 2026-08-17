@@ -27,15 +27,25 @@ async def seed(file: UploadFile = File(...), settings: Settings = Depends(get_se
         artist = value(row, "artist") or "Unknown"
         album = value(row, "album", "album_name")
         source = value(row, "source", "provider")
-        source_id = value(row, "source_id", "id")
+        source_id = value(row, "source_id")
         source_url = value(row, "source_url", "url")
         isrc = value(row, "isrc")
         artwork = value(row, "artwork_url", "artwork")
         duration = value(row, "duration_ms")
         cache = value(row, "100_cache", "100cache", "cache")
+        requested = 1 if str(cache).lower() in {"1", "true", "yes", "y"} else 0
         await db.query("""INSERT INTO tracks(title,artist,album_name,source,source_id,source_url,isrc,artwork_url,duration_ms,cache_requested)
             VALUES(?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(id) DO NOTHING""", [title, artist, album, source, source_id, source_url, isrc, artwork, int(duration) if duration and duration.isdigit() else None, 1 if str(cache).lower() in {"1","true","yes","y"} else 0])
+            ON CONFLICT(title, artist, album_name) DO UPDATE SET
+              source=COALESCE(excluded.source, tracks.source),
+              source_id=COALESCE(excluded.source_id, tracks.source_id),
+              source_url=COALESCE(excluded.source_url, tracks.source_url),
+              isrc=COALESCE(excluded.isrc, tracks.isrc),
+              artwork_url=COALESCE(excluded.artwork_url, tracks.artwork_url),
+              duration_ms=COALESCE(excluded.duration_ms, tracks.duration_ms),
+              cache_requested=excluded.cache_requested,
+              updated_at=CURRENT_TIMESTAMP""",
+            [title, artist, album, source, source_id, source_url, isrc, artwork, int(duration) if duration and duration.isdigit() else None, requested])
         imported += 1
-        top += 1 if str(cache).lower() in {"1","true","yes","y"} else 0
+        top += requested
     return {"ok": True, "rows": len(rows), "imported": imported, "top_cache_candidates": top}
