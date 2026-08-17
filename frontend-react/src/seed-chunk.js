@@ -1,4 +1,4 @@
-const CHUNK_SIZE = 100
+const CHUNK_SIZE = 10
 
 function parseCsv(text) {
   const rows = []
