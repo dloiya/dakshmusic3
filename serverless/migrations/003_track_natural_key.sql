@@ -1,4 +1,0 @@
--- Superseded duplicate migration.
--- The canonical natural_key migration is 002_track_natural_key.sql.
--- Keep this migration file as a no-op so existing migration history remains
--- stable while a fresh database receives the schema from migration 002.
