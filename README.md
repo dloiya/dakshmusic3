@@ -1,31 +1,76 @@
-# Personal Music Server — GitHub-only / no VPS
+# dakshmusic3 v2
 
-Production:
+Ground-up rebuild of the personal music server.
 
-    Device
-       |
-       v
-    Cloudflare Worker
-       |
-       +--> D1 (playlist, metadata, cache/job state)
-       |
-       +--> GitHub Actions (on-demand acquisition)
-                    |
-                    +--> SpotiFLAC (resolved via Apple Music search)
-                    +--> YtFLAC/yt-dlp fallback
-                    +--> R2 (via an authenticated PUT to the Worker)
-       |
-       v
-    Device playback
+## Architecture
 
-Permanent audio lives in Cloudflare R2, bound directly to the Worker (no OAuth
-token refresh needed for playback). No VPS, Docker, PostgreSQL or Redis is
-required for production.
+```text
+React UI
+   |
+   v
+FastAPI API
+   |
+   +--> services
+   |      +--> acquisition
+   |      +--> queue
+   |      +--> cache
+   |      +--> library
+   |      +--> system
+   |
+   +--> connectors
+          +--> Cloudflare D1
+          +--> Cloudflare R2
+          +--> Deezer / MusicBrainz
+          +--> GitHub Actions
+          +--> SpotiFLAC / YTFLAC workers
+```
 
-See `GITHUB_ONLY_SETUP.md`.
+The new backend lives under `backend/`, the React application under `frontend-react/`, and the canonical D1 schema under `db/`.
 
-The existing Docker/FastAPI implementation is retained only for local/reference
-use.
+## API
 
-Provider scripts must be configured for the exact SpotiFLAC/YtFLAC versions you
-use. Only use sources and downloads you are authorized to access.
+The v2 API is versioned under `/api/v1` and will expose auth, library, playlist, queue, search, acquisition, seed, cache, status, and CRUD operations.
+
+`GET /api/v1/status` is read-only and reports songs currently in `queued`, `dispatched`, or `running` acquisition states.
+
+## Database
+
+The clean D1 schema contains only the canonical v2 tables:
+
+- `tracks`
+- `albums`
+- `playlist_entries`
+- `queue_entries`
+- `queue_state`
+- `acquisition_jobs`
+- `cache_objects`
+- `sessions`
+- `import_jobs`
+
+Device cache remains local to the browser. Audio and artwork objects live in R2; D1 stores their canonical `storage_key` values.
+
+## Development
+
+Backend:
+
+```bash
+cd backend
+python -m venv .venv
+# activate the environment
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Frontend:
+
+```bash
+cd frontend-react
+npm install
+npm run dev
+```
+
+Set the `DAKSH_*` environment variables before using the FastAPI D1/R2 connectors.
+
+The old JavaScript Worker/frontend remains in the repository temporarily as a migration reference. It is not the v2 application architecture and will be removed after feature parity and cutover tests pass.
+
+Only use sources and downloads you are authorized to access.
