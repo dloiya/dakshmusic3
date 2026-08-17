@@ -24,14 +24,16 @@
       "bucket_name": "dakshmusic3-audio"
     }
   ],
-  "secrets": [
-    { "name": "DAKSH_ENVIRONMENT", "required": true },
-    { "name": "DAKSH_ADMIN_PASSWORD", "required": true },
-    { "name": "DAKSH_SESSION_SECRET", "required": true },
-    { "name": "DAKSH_WORKER_CALLBACK_SECRET", "required": true },
-    { "name": "DAKSH_GITHUB_TOKEN", "required": true },
-    { "name": "DAKSH_CORS_ORIGINS", "required": true }
-  ],
+  "secrets": {
+    "required": [
+      "DAKSH_ENVIRONMENT",
+      "DAKSH_ADMIN_PASSWORD",
+      "DAKSH_SESSION_SECRET",
+      "DAKSH_WORKER_CALLBACK_SECRET",
+      "DAKSH_GITHUB_TOKEN",
+      "DAKSH_CORS_ORIGINS"
+    ]
+  },
   "observability": {
     "enabled": true
   }
