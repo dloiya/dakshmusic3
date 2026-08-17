@@ -26,18 +26,21 @@ jobs:
           set -euo pipefail
           python3 scripts/enrich_seed_metadata.py
 
-      - name: Verify acquisition and library routing
+      - name: Verify consolidated acquisition, seed metadata, routing, and UI
         run: |
           set -euo pipefail
-          grep -q "handleLibraryRoute" serverless/app_v2.js
-          grep -q "async function dispatchWarm" serverless/library.js
-          grep -q "async function enrichSeedTrackMetadata" serverless/library.js
-          grep -q "duration_ms" serverless/library.js
-          grep -q "artwork_url" serverless/library.js
-          grep -q "async function acquisitionStatus" serverless/library.js
-          grep -q 'jobs/status' serverless/library.js
+          grep -q 'handleLibraryV3' serverless/app_v2.js
+          grep -q 'backfillMissingMetadata' serverless/app_v2.js
+          grep -q 'async function seed' serverless/library.js
+          grep -q 'isTopCacheRow' serverless/library.js
+          grep -q 'duration_ms' serverless/library.js
+          grep -q 'artwork_url' serverless/library.js
+          grep -q 'handleAcquisitionRoute' serverless/entry.js
+          grep -q 'api/v1/acquisitions' serverless/entry.js
+          grep -q 'api/v1/acquisitions/summary' serverless/entry.js
           grep -q '/jobs/status' frontend/playlist-ui.js
-          echo "Acquisition, seed metadata, duration, library routing, and UI verified"
+          grep -q 'tracks/.*acquire' serverless/acquisition_route.js
+          echo "Consolidated acquisition, seed metadata, duration, library routing, and UI verified"
 
       - name: Install Wrangler
         working-directory: serverless
