@@ -12,42 +12,20 @@ from ...repositories import D1Repository, LibraryRepository
 
 
 class DataService:
-    SEED_CHUNK_SIZE = 10
+    # Keep each HTTP request tiny. D1 work and JSON parsing both count toward
+    # Worker CPU time, and the previous importer became progressively slower
+    # because its identity queries scanned the growing tracks table.
+    SEED_CHUNK_SIZE = 5
     METADATA_CHUNK_SIZE = 1
 
-    # The enriched CSV is now the metadata source of truth.  We keep the
-    # Deezer connector out of the import path so a seed cannot burn Worker
-    # CPU doing remote metadata lookups.
     METADATA_COLUMNS = (
-        "Deezer Found",
-        "Deezer Match Type",
-        "Deezer Track ID",
-        "Deezer Track Name",
-        "Deezer Artist",
-        "Deezer Artist ID",
-        "Deezer Track Album",
-        "Deezer Track Album ID",
-        "Deezer Duration (sec)",
-        "Deezer Preview",
-        "Deezer URL",
-        "Deezer BPM",
-        "Deezer Release Date",
-        "Deezer ISRC",
-        "Deezer Explicit",
-        "Deezer Rank",
-        "Deezer Readable",
-        "Deezer Track Link",
-        "Artwork Source",
-        "Artwork Album",
-        "Artwork Album ID",
-        "Artwork Artist",
-        "Artwork Match Score",
-        "Artwork Match Reasons",
-        "Artwork",
-        "Artwork Large",
-        "Artwork URL",
-        "Artwork Genre",
-        "Artwork Release Date",
+        "Deezer Found", "Deezer Match Type", "Deezer Track ID", "Deezer Track Name",
+        "Deezer Artist", "Deezer Artist ID", "Deezer Track Album", "Deezer Track Album ID",
+        "Deezer Duration (sec)", "Deezer Preview", "Deezer URL", "Deezer BPM",
+        "Deezer Release Date", "Deezer ISRC", "Deezer Explicit", "Deezer Rank",
+        "Deezer Readable", "Deezer Track Link", "Artwork Source", "Artwork Album",
+        "Artwork Album ID", "Artwork Artist", "Artwork Match Score", "Artwork Match Reasons",
+        "Artwork", "Artwork Large", "Artwork URL", "Artwork Genre", "Artwork Release Date",
     )
 
     def __init__(self, settings: Settings, db: D1Repository):
@@ -64,10 +42,7 @@ class DataService:
 
     @staticmethod
     def _v(row, *names):
-        values = {
-            str(k).strip().lower().replace("_", "").replace(" ", ""): v
-            for k, v in row.items()
-        }
+        values = {str(k).strip().lower().replace("_", "").replace(" ", ""): v for k, v in row.items()}
         for name in names:
             v = values.get(name.lower().replace("_", "").replace(" ", ""))
             if v is not None and str(v).strip():
@@ -85,31 +60,25 @@ class DataService:
 
     @classmethod
     def _metadata(cls, row: dict[str, Any]) -> dict[str, Any]:
-        """Extract all enriched CSV fields without requiring them in old CSVs."""
         metadata: dict[str, Any] = {}
         for column in cls.METADATA_COLUMNS:
             value = cls._v(row, column)
             if value is not None:
                 metadata[column] = value
 
-        # Keep duration_ms explicitly; this is the canonical duration field in
-        # the enriched CSV and must not be reconstructed from a remote API.
         duration_ms = cls._v(row, "duration_ms")
         if duration_ms is not None:
             metadata["duration_ms"] = cls._int(duration_ms)
 
-        # Preserve any future Deezer_/Artwork_ columns automatically as well.
         for key, value in row.items():
             normalized = str(key).strip()
             if normalized.startswith(("Deezer ", "Artwork")) and normalized not in metadata:
                 if value is not None and str(value).strip():
                     metadata[normalized] = str(value).strip()
-
         return metadata
 
     @classmethod
-    def _artwork_url(cls, metadata: dict[str, Any]) -> str | None:
-        # Prefer the largest artwork supplied by the enrichment script.
+    def _artwork_url(cls, metadata):
         for key in ("Artwork Large", "Artwork", "Artwork URL"):
             value = metadata.get(key)
             if value and str(value).strip():
@@ -127,9 +96,6 @@ class DataService:
         track_type = cls._v(row, "type")
         cache = cls._v(row, "100cache", "100 cache", "cache", "top cache") or ""
         metadata = cls._metadata(row)
-
-        # The CSV's ISRC is authoritative. Deezer ISRC is retained inside
-        # metadata and never replaces the input ISRC.
         duration_ms = cls._int(cls._v(row, "duration_ms"))
         if duration_ms is None:
             duration_ms = cls._int(metadata.get("duration_ms"))
@@ -137,66 +103,50 @@ class DataService:
         deezer_track_id = cls._v(row, "Deezer Track ID")
         deezer_url = cls._v(row, "Deezer URL", "Deezer Track Link")
         artwork_url = cls._artwork_url(metadata)
-
         source = "deezer" if deezer_track_id else ("apple" if cls._v(row, "Artwork Source") == "APPLE" else None)
         source_id = deezer_track_id or apple_id
         source_url = deezer_url or cls._v(row, "Artwork URL")
 
         return {
-            "title": title,
-            "artist": artist,
-            "album": album,
-            "isrc": isrc,
-            "apple_id": apple_id,
-            "playlist": playlist,
-            "type": track_type,
+            "title": title, "artist": artist, "album": album, "isrc": isrc,
+            "apple_id": apple_id, "playlist": playlist, "type": track_type,
             "cache": int(cache.lower() in {"1", "true", "yes", "y"}),
-            "duration_ms": duration_ms,
-            "artwork_url": artwork_url,
-            "source": source,
-            "source_id": source_id,
-            "source_url": source_url,
+            "duration_ms": duration_ms, "artwork_url": artwork_url,
+            "source": source, "source_id": source_id, "source_url": source_url,
             "metadata_json": json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) if metadata else None,
         }
 
-    @staticmethod
-    def _norm(value):
-        return " ".join(str(value or "").casefold().split())
-
     async def enrich_metadata_chunk(self, rows):
-        """Import metadata already present in the enriched CSV.
-
-        No network call is made here. This keeps the operation deterministic
-        and avoids the Worker CPU limit that the old Deezer enrichment path hit.
-        """
+        # Metadata is already in the new CSV. Never call Deezer from this path.
         if not rows or len(rows) > self.METADATA_CHUNK_SIZE:
             raise ValueError(f"metadata chunk must contain 1-{self.METADATA_CHUNK_SIZE} rows")
-
         track = self._track(rows[0])
         if not track.get("metadata_json") and track.get("duration_ms") is None and not track.get("artwork_url"):
             return {"processed": 1, "enriched": 0}
 
-        await self.db.batch([(
-            """UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), album_name=COALESCE(NULLIF(?,''),album_name), metadata_json=COALESCE(?,metadata_json), updated_at=CURRENT_TIMESTAMP WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))""",
-            [track.get("duration_ms"), track.get("artwork_url"), track.get("source"), track.get("source_id"), track.get("source_url"), track.get("album"), track.get("metadata_json"), track.get("isrc"), track.get("isrc"), track["title"], track["artist"], track.get("album")],
-        )])
+        # IMPORTANT: use the indexed ISRC path when an ISRC exists. The old
+        # LOWER(TRIM(...)) OR LOWER(isrc) predicate forced table scans.
+        if track.get("isrc"):
+            where = "isrc=?"
+            identity = [track["isrc"]]
+        else:
+            where = "title=? AND artist=? AND COALESCE(album_name,'')=COALESCE(?, '')"
+            identity = [track["title"], track["artist"], track.get("album")]
+
+        await self.db.execute(
+            f"""UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), album_name=COALESCE(NULLIF(?,''),album_name), metadata_json=COALESCE(?,metadata_json), updated_at=CURRENT_TIMESTAMP WHERE {where}""",
+            [track.get("duration_ms"), track.get("artwork_url"), track.get("source"), track.get("source_id"), track.get("source_url"), track.get("album"), track.get("metadata_json"), *identity],
+        )
         return {"processed": 1, "enriched": 1}
 
     async def _insert_import_rows(self, job_id, rows):
         tracks = []
         seen = set()
         failed = 0
-
         for row in rows:
             try:
                 track = self._track(row)
-                # ISRC is the primary identity. Fall back to title/artist/album
-                # only for rows that genuinely have no ISRC.
-                key = (
-                    ("isrc", track["isrc"].casefold())
-                    if track["isrc"]
-                    else ("text", track["title"].casefold(), track["artist"].casefold(), (track["album"] or "").casefold())
-                )
+                key = (("isrc", track["isrc"].casefold()) if track["isrc"] else ("text", track["title"].casefold(), track["artist"].casefold(), (track["album"] or "").casefold()))
                 if key not in seen:
                     seen.add(key)
                     tracks.append(track)
@@ -204,20 +154,31 @@ class DataService:
                 failed += 1
 
         statements = []
-
         for track in tracks:
-            statements.append((
-                """UPDATE tracks SET title=?,artist=?,album_name=?,isrc=COALESCE(?,isrc),duration_ms=COALESCE(?,duration_ms),artwork_url=COALESCE(?,artwork_url),source=COALESCE(?,source),source_id=COALESCE(?,source_id),source_url=COALESCE(?,source_url),metadata_json=COALESCE(?,metadata_json),cache_requested=MAX(cache_requested,?),updated_at=CURRENT_TIMESTAMP WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(artist,'')))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,''))))""",
-                [track["title"], track["artist"], track["album"], track["isrc"], track["duration_ms"], track["artwork_url"], track["source"], track["source_id"], track["source_url"], track["metadata_json"], track["cache"], track["isrc"], track["isrc"], track["title"], track["artist"], track["album"]],
-            ))
-            statements.append((
-                """INSERT INTO tracks(title,artist,album_name,isrc,duration_ms,artwork_url,source,source_id,source_url,metadata_json,cache_requested) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE (isrc IS NOT NULL AND ? IS NOT NULL AND LOWER(isrc)=LOWER(?)) OR (LOWER(TRIM(title))=LOWER(TRIM(?)) AND LOWER(TRIM(artist))=LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(album_name,'')))=LOWER(TRIM(COALESCE(?,'')))))""",
-                [track["title"], track["artist"], track["album"], track["isrc"], track["duration_ms"], track["artwork_url"], track["source"], track["source_id"], track["source_url"], track["metadata_json"], track["cache"], track["isrc"], track["isrc"], track["title"], track["artist"], track["album"]],
-            ))
+            values = [track["title"], track["artist"], track["album"], track["isrc"], track["duration_ms"], track["artwork_url"], track["source"], track["source_id"], track["source_url"], track["metadata_json"], track["cache"]]
+
+            if track.get("isrc"):
+                # Both statements use the indexed isrc column. This replaces
+                # the old OR predicate that became increasingly expensive as
+                # the library grew.
+                statements.append((
+                    """UPDATE tracks SET title=?,artist=?,album_name=?,isrc=COALESCE(?,isrc),duration_ms=COALESCE(?,duration_ms),artwork_url=COALESCE(?,artwork_url),source=COALESCE(?,source),source_id=COALESCE(?,source_id),source_url=COALESCE(?,source_url),metadata_json=COALESCE(?,metadata_json),cache_requested=MAX(cache_requested,?),updated_at=CURRENT_TIMESTAMP WHERE isrc=?""",
+                    values + [track["isrc"]],
+                ))
+                statements.append((
+                    """INSERT INTO tracks(title,artist,album_name,isrc,duration_ms,artwork_url,source,source_id,source_url,metadata_json,cache_requested) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE isrc=?)""",
+                    values + [track["isrc"]],
+                ))
+            else:
+                # No-ISRC rows use the table's existing UNIQUE(title,artist,album_name)
+                # index and exact equality, avoiding LOWER/TRIM table scans.
+                statements.append((
+                    """INSERT INTO tracks(title,artist,album_name,isrc,duration_ms,artwork_url,source,source_id,source_url,metadata_json,cache_requested) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(title,artist,album_name) DO UPDATE SET duration_ms=COALESCE(excluded.duration_ms,tracks.duration_ms),artwork_url=COALESCE(excluded.artwork_url,tracks.artwork_url),source=COALESCE(excluded.source,tracks.source),source_id=COALESCE(excluded.source_id,tracks.source_id),source_url=COALESCE(excluded.source_url,tracks.source_url),metadata_json=COALESCE(excluded.metadata_json,tracks.metadata_json),cache_requested=MAX(tracks.cache_requested,excluded.cache_requested),updated_at=CURRENT_TIMESTAMP""",
+                    values,
+                ))
 
         if statements:
             await self.db.batch(statements)
-
         return len(tracks), failed
 
     async def start_import(self, filename, total):
@@ -237,11 +198,28 @@ class DataService:
         total_imported = job["imported_rows"] + imported
         total_failed = job["failed_rows"] + failed
 
+        # Do NOT rebuild the entire playlist on every import. The previous
+        # final DELETE + INSERT scanned the whole growing library and was the
+        # second major CPU spike. Add only this chunk's tracks.
+        if rows:
+            tracks = [self._track(row) for row in rows]
+            predicates = []
+            params = []
+            for track in tracks:
+                if track.get("isrc"):
+                    predicates.append("t.isrc=?")
+                    params.append(track["isrc"])
+                else:
+                    predicates.append("t.title=? AND t.artist=? AND COALESCE(t.album_name,'')=COALESCE(?, '')")
+                    params.extend([track["title"], track["artist"], track.get("album")])
+            if predicates:
+                # Position is allocated only for tracks not already in the
+                # playlist. The MAX(position) subquery is evaluated once for
+                # this small chunk, not once for the whole library.
+                sql = f"""INSERT OR IGNORE INTO playlist_entries(track_id,position) SELECT t.id, COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1 FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL AND ({' OR '.join(predicates)})"""
+                await self.db.execute(sql, params)
+
         if done:
-            # Keep one playlist entry per track and build a stable flat library
-            # after the final chunk. Duplicate rows are already removed by ISRC.
-            await self.db.execute("DELETE FROM playlist_entries WHERE id NOT IN (SELECT MIN(id) FROM playlist_entries GROUP BY track_id)")
-            await self.db.execute("INSERT INTO playlist_entries(track_id,position) SELECT t.id,COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1 FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL")
             await self.db.execute("UPDATE import_jobs SET status='complete',processed_rows=?,imported_rows=?,failed_rows=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed, total_imported, total_failed, job_id])
         else:
             await self.db.execute("UPDATE import_jobs SET processed_rows=?,imported_rows=?,failed_rows=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed, total_imported, total_failed, job_id])
@@ -249,6 +227,8 @@ class DataService:
         return {"ok": True, "job_id": job_id, "processed": processed, "total": job["total_rows"], "imported": total_imported, "failed": total_failed, "complete": done}
 
     async def import_csv(self, filename: str, content: bytes):
+        # Kept for API compatibility. The React importer uses /seed/chunk so
+        # each request processes only SEED_CHUNK_SIZE rows.
         rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
         job_id = await self.start_import(filename, len(rows))
         for i in range(0, len(rows), self.SEED_CHUNK_SIZE):
