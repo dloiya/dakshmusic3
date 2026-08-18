@@ -34,11 +34,12 @@ jobs:
           test -f "$FILE"
           echo "SQL file: $FILE"
           echo "Size: $(du -h "$FILE" | cut -f1)"
-          grep -q '^BEGIN TRANSACTION;' "$FILE"
-          grep -q '^COMMIT;' "$FILE"
           if grep -q 'ON CONFLICT(isrc)' "$FILE"; then
             echo 'ERROR: unsupported ON CONFLICT(isrc) remains'
             exit 1
+          fi
+          if grep -Eq '^BEGIN( TRANSACTION)?;|^COMMIT;' "$FILE"; then
+            echo 'INFO: transaction statements found; they will be removed before D1 execution.'
           fi
 
       # Do not enable npm caching here: this repository intentionally has no
@@ -51,6 +52,20 @@ jobs:
       - name: Install Wrangler
         run: npm install --global wrangler@latest
 
+      - name: Prepare D1 SQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="${{ inputs.sql_file }}"
+          # D1 execution must not receive explicit SQLite transaction-control
+          # statements. D1 handles each statement safely at the database layer.
+          sed -E '/^[[:space:]]*BEGIN( TRANSACTION)?;[[:space:]]*$/d; /^[[:space:]]*COMMIT;[[:space:]]*$/d' "$FILE" > /tmp/dakshmusic3_d1_import.sql
+          echo "Prepared SQL size: $(du -h /tmp/dakshmusic3_d1_import.sql | cut -f1)"
+          if grep -Eq '^BEGIN( TRANSACTION)?;|^COMMIT;' /tmp/dakshmusic3_d1_import.sql; then
+            echo 'ERROR: transaction statements remain after preparation'
+            exit 1
+          fi
+
       - name: Import into production D1
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -58,4 +73,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          wrangler d1 execute dakshmusic3 --remote --file="${{ inputs.sql_file }}"
+          wrangler d1 execute dakshmusic3 --remote --file=/tmp/dakshmusic3_d1_import.sql
