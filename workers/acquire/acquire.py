@@ -25,6 +25,8 @@ R2_ACCESS_KEY = os.environ["R2_ACCESS_KEY"]
 R2_SECRET = os.environ["R2_SECRET_KEY"]
 RESULT_FILE = Path(os.environ.get("RESULT_FILE", "/tmp/acquisition-result.json"))
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (dakshmusic3-acquisition)"}
+
 
 def write_result(status: str, **extra):
     RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
@@ -32,14 +34,14 @@ def write_result(status: str, **extra):
 
 def _deezer_track() -> dict:
     if SOURCE == "deezer" and SOURCE_ID:
-        response = requests.get(f"https://api.deezer.com/track/{SOURCE_ID}", headers={"User-Agent": "dakshmusic3-acquisition"}, timeout=20)
+        response = requests.get(f"https://api.deezer.com/track/{SOURCE_ID}", headers=HEADERS, timeout=20)
         response.raise_for_status()
         track = response.json()
         if track.get("id"):
             return track
 
     if ISRC:
-        response = requests.get(f"https://api.deezer.com/track/isrc:{ISRC}", headers={"User-Agent": "dakshmusic3-acquisition"}, timeout=20)
+        response = requests.get(f"https://api.deezer.com/track/isrc:{ISRC}", headers=HEADERS, timeout=20)
         if response.ok:
             track = response.json()
             if track.get("id"):
@@ -48,7 +50,7 @@ def _deezer_track() -> dict:
     query = f"{TITLE} {ARTIST}".strip()
     if not query:
         raise RuntimeError("Cannot resolve Deezer track: title and artist are empty")
-    response = requests.get("https://api.deezer.com/search/track", params={"q": query, "limit": 10}, headers={"User-Agent": "dakshmusic3-acquisition"}, timeout=20)
+    response = requests.get("https://api.deezer.com/search/track", params={"q": query, "limit": 10}, headers=HEADERS, timeout=20)
     response.raise_for_status()
     tracks = response.json().get("data") or []
     if not tracks:
@@ -73,79 +75,105 @@ def _deezer_track_url() -> str:
     return f"https://www.deezer.com/track/{track_id}"
 
 
-def _songlink_spotify(deezer_url: str) -> str | None:
+def _songlink_links(deezer_url: str) -> dict[str, str]:
+    """Resolve cross-service links from the public Songlink page; no API key."""
     try:
         response = requests.get(
-            f"https://song.link/?url={requests.utils.quote(deezer_url, safe='')}",
-            headers={"User-Agent": "Mozilla/5.0 (dakshmusic3-acquisition)"},
+            "https://song.link/",
+            params={"url": deezer_url},
+            headers=HEADERS,
             timeout=20,
             allow_redirects=True,
         )
-        if response.ok:
-            for pattern in (
-                r'https?://open\.spotify\.com/(?:intl-[^/]+/)?track/[A-Za-z0-9]+',
-                r'https?:\\/\\/open\.spotify\.com\\/(?:intl-[^/]+\\/)?track\\/[A-Za-z0-9]+',
-            ):
-                match = re.search(pattern, response.text)
-                if match:
-                    return match.group(0).replace('\\/', '/')
-    except Exception:
-        pass
-    return None
+        if not response.ok:
+            return {}
+        html = response.text
+    except requests.RequestException:
+        return {}
+
+    links: dict[str, str] = {}
+    patterns = {
+        "spotify": r'https?:\\?/\\?/open\\.spotify\\.com\\/(?:intl-[^/\\]+\\/)?track\\/[A-Za-z0-9]+',
+        "youtube": r'https?:\\?/\\?/(?:www\\.)?youtube\\.com\\/(?:watch\\?v=|shorts/)[A-Za-z0-9_-]+',
+        "youtube_music": r'https?:\\?/?music\\.youtube\\.com\\/watch\\?v=[A-Za-z0-9_-]+',
+    }
+    for name, pattern in patterns.items():
+        match = re.search(pattern, html)
+        if match:
+            links[name] = match.group(0).replace("\\/", "/")
+    return links
 
 
-def _resolve_youtube_url() -> str:
+def _resolve_youtube_url(deezer_url: str) -> str | None:
+    links = _songlink_links(deezer_url)
+    # Prefer YouTube Music because it is more likely to point at the song
+    # rather than an official music video.
+    if links.get("youtube_music"):
+        return links["youtube_music"]
+    if links.get("youtube"):
+        return links["youtube"]
+
     query = f"{ISRC} {TITLE} {ARTIST}".strip() if ISRC else f"{TITLE} {ARTIST}".strip()
     command = ["yt-dlp", f"ytsearch1:{query}", "--flat-playlist", "--print", "%(webpage_url)s", "--skip-download", "--no-warnings"]
     completed = subprocess.run(command, text=True, capture_output=True, timeout=90)
     if completed.returncode:
-        raise RuntimeError((completed.stderr[-2000:] or completed.stdout[-2000:] or "yt-dlp search failed").replace("\n", " "))
+        return None
     for line in completed.stdout.splitlines():
         line = line.strip()
         if line.startswith(("http://", "https://")):
             return line
-    raise RuntimeError(f"No YouTube result for {TITLE} / {ARTIST}")
+    return None
 
 
-def _run_spotiflac(output: Path):
+def _download_spotiflac(url: str, output: Path, services: list[str]) -> None:
     import asyncio
     import glob
     from SpotiFLAC.client import AsyncSpotiFLAC
 
-    deezer_url = _deezer_track_url()
-    spotify_url = _songlink_spotify(deezer_url)
-
-    # SpotiFLAC's YouTube provider is not installed in the current runner.
-    # Therefore only pass Spotify URLs to SpotiFLAC. If Spotify cannot be
-    # resolved, download the already-resolved YouTube URL directly with
-    # yt-dlp instead of invoking SpotiFLAC with an unsupported provider.
-    if not spotify_url:
-        youtube_url = _resolve_youtube_url()
-        print(f"No Spotify mapping for {TITLE} / {ARTIST}; using yt-dlp directly: {youtube_url}")
-        _run_ytdlp(output, target_url=youtube_url)
-        return
-
-    print(f"SpotiFLAC input: Spotify {spotify_url}")
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
 
     async def download():
         async with AsyncSpotiFLAC(
             output_dir=str(outdir),
-            services=["deezer", "tidal", "qobuz", "amazon"],
+            services=services,
             quality="LOSSLESS",
             track_max_retries=2,
             timeout_s=180,
             embed_lyrics=False,
             use_extensions_fallback=False,
         ) as client:
-            await client.download_track(spotify_url)
+            await client.download_track(url)
 
     asyncio.run(download())
     files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
     if not files:
         raise RuntimeError(f"SpotiFLAC produced no FLAC for {TITLE} / {ARTIST}")
     shutil.copy2(max(files, key=lambda p: p.stat().st_mtime), output)
+
+
+def _run_spotiflac(output: Path):
+    deezer_url = _deezer_track_url()
+    links = _songlink_links(deezer_url)
+    spotify_url = links.get("spotify")
+
+    # 1. ISRC -> Deezer -> Songlink -> Spotify -> SpotiFLAC.
+    if spotify_url:
+        print(f"SpotiFLAC input: Spotify {spotify_url}")
+        try:
+            _download_spotiflac(spotify_url, output, ["deezer", "tidal", "qobuz", "amazon"])
+            return
+        except Exception as exc:
+            print(f"Spotify acquisition failed for {TITLE} / {ARTIST}: {exc}")
+            print("Falling back to YouTube Music")
+
+    # 2. Spotify missing/not found -> YouTube Music/YouTube -> SpotiFLAC.
+    youtube_url = _resolve_youtube_url(deezer_url)
+    if not youtube_url:
+        raise RuntimeError(f"No Spotify or YouTube mapping for {TITLE} / {ARTIST}")
+
+    print(f"SpotiFLAC input: YouTube {youtube_url}")
+    _download_spotiflac(youtube_url, output, ["youtube"])
 
 
 def _run_ytdlp(output: Path, target_url: str | None = None):
