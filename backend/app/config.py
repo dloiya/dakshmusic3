@@ -22,10 +22,12 @@ class Settings(BaseSettings):
     github_repo: str = "dloiya/dakshmusic3"
     github_ref: str = "main"
     acquire_workflow: str = "acquire-audio.yml"
+    populate_cache_workflow: str = "populate-top-cache.yml"
     worker_public_url: str = ""
     worker_callback_secret: str = ""
     spotiflac_api_url: str = ""
     deezer_api_url: str = "https://api.deezer.com"
+    top_cache_limit: int = 100
     model_config = SettingsConfigDict(env_file=".env", env_prefix="DAKSH_", extra="ignore")
 
 
@@ -44,6 +46,7 @@ def get_settings() -> Settings:
             "DAKSH_WORKER_PUBLIC_URL": "worker_public_url",
             "DEEZER_API": "deezer_api_url",
             "SPOTIFLAC_API_URL": "spotiflac_api_url",
+            "TOP_CACHE_LIMIT": "top_cache_limit",
         }
         for name, field in mapping.items():
             value = getattr(env, name, None)
