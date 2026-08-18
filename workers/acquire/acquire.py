@@ -66,35 +66,62 @@ def _deezer_track_url() -> str:
     return f"https://www.deezer.com/track/{track['id']}"
 
 
-def _songlink_links(deezer_url: str) -> dict[str, str]:
-    try:
-        response = requests.get("https://song.link/", params={"url": deezer_url}, headers=HEADERS, timeout=20, allow_redirects=True)
-        if not response.ok:
-            return {}
-        html = response.text
-    except requests.RequestException:
-        return {}
-    links = {}
-    patterns = {
-        "spotify": r'https?:\\?/\\?/open\\.spotify\\.com\\/(?:intl-[^/\\]+\\/)?track\\/[A-Za-z0-9]+',
-        "youtube": r'https?:\\?/\\?/(?:www\\.)?youtube\\.com\\/(?:watch\\?v=|shorts/)[A-Za-z0-9_-]+',
-        "youtube_music": r'https?:\\?/\\?music\\.youtube\\.com\\/watch\\?v=[A-Za-z0-9_-]+',
-    }
-    for name, pattern in patterns.items():
-        match = re.search(pattern, html)
-        if match:
-            links[name] = match.group(0).replace("\\/", "/")
-    return links
+def _resolve_spotify_from_isrc() -> str | None:
+    """Resolve ISRC -> Spotify URL without Spotify credentials."""
+    if not ISRC:
+        return None
+
+    response = requests.get(
+        f"https://isrctools.com/api/lookup/{ISRC}",
+        headers={
+            **HEADERS,
+            "Accept": "application/json",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    if not data.get("found") or not data.get("spotifyAvailable"):
+        return None
+
+    tracks = [
+        track
+        for track in (data.get("tracks") or [])
+        if track.get("url") and "open.spotify.com/track/" in track["url"]
+    ]
+
+    if not tracks:
+        return None
+
+    # Prefer the most popular Spotify recording returned for the ISRC.
+    tracks.sort(
+        key=lambda track: (
+            int(track.get("popularity") or 0),
+            int(track.get("durationMs") or 0),
+        ),
+        reverse=True,
+    )
+
+    selected = tracks[0]
+    print(
+        f"ISRC Tools: {ISRC} -> Spotify {selected['url']} "
+        f"(popularity={selected.get('popularity', 0)})"
+    )
+    return selected["url"]
 
 
-def _resolve_youtube_url(deezer_url: str) -> str | None:
-    links = _songlink_links(deezer_url)
-    if links.get("youtube_music"):
-        return links["youtube_music"]
-    if links.get("youtube"):
-        return links["youtube"]
+def _resolve_youtube_url() -> str | None:
     query = f"{ISRC} {TITLE} {ARTIST}".strip() if ISRC else f"{TITLE} {ARTIST}".strip()
-    command = ["yt-dlp", f"ytsearch1:{query}", "--flat-playlist", "--print", "%(webpage_url)s", "--skip-download", "--no-warnings"]
+    command = [
+        "yt-dlp",
+        f"ytsearch1:{query}",
+        "--flat-playlist",
+        "--print",
+        "%(webpage_url)s",
+        "--skip-download",
+        "--no-warnings",
+    ]
     completed = subprocess.run(command, text=True, capture_output=True, timeout=90)
     if completed.returncode:
         return None
@@ -111,9 +138,19 @@ def _download_spotiflac(url: str, output: Path) -> None:
     from SpotiFLAC.client import AsyncSpotiFLAC
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
+
     async def download():
-        async with AsyncSpotiFLAC(output_dir=str(outdir), services=["tidal", "qobuz", "amazon"], quality="LOSSLESS", track_max_retries=2, timeout_s=180, embed_lyrics=False, use_extensions_fallback=False) as client:
+        async with AsyncSpotiFLAC(
+            output_dir=str(outdir),
+            services=["tidal", "qobuz", "amazon"],
+            quality="LOSSLESS",
+            track_max_retries=2,
+            timeout_s=180,
+            embed_lyrics=False,
+            use_extensions_fallback=False,
+        ) as client:
             await client.download_track(url)
+
     asyncio.run(download())
     files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
     if not files:
@@ -122,8 +159,9 @@ def _download_spotiflac(url: str, output: Path) -> None:
 
 
 def _run_spotiflac(output: Path):
-    deezer_url = _deezer_track_url()
-    spotify_url = _songlink_links(deezer_url).get("spotify")
+    # Deezer is metadata-only. Audio acquisition starts from ISRC -> Spotify.
+    spotify_url = _resolve_spotify_from_isrc()
+
     if spotify_url:
         print(f"SpotiFLAC input: Spotify {spotify_url}")
         try:
@@ -131,7 +169,11 @@ def _run_spotiflac(output: Path):
             return
         except Exception as exc:
             print(f"Spotify acquisition failed for {TITLE} / {ARTIST}: {exc}")
-    youtube_url = _resolve_youtube_url(deezer_url)
+    else:
+        print(f"No Spotify mapping for {TITLE} / {ARTIST} (ISRC={ISRC})")
+
+    # Spotify genuinely unavailable/failed: use YouTube directly with yt-dlp.
+    youtube_url = _resolve_youtube_url()
     if not youtube_url:
         raise RuntimeError(f"No Spotify or YouTube mapping for {TITLE} / {ARTIST}")
     print(f"YouTube fallback: {youtube_url}")
