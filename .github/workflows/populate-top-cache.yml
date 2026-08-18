@@ -1,0 +1,35 @@
+name: Populate Top Cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum number of Top Cache tracks to queue
+        required: true
+        default: '100'
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  populate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LIMIT: ${{ inputs.limit }}
+      D1_DATABASE: dakshmusic3
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run Top Cache population
+        run: |
+          npx --yes wrangler@latest d1 info "$D1_DATABASE" --remote --json >/dev/null
+          python .github/scripts/populate_top_cache.py
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
