@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -15,18 +16,31 @@ ARTIST = os.environ.get("ARTIST", "")
 ALBUM = os.environ.get("ALBUM", "")
 SOURCE = os.environ.get("SOURCE", "")
 SOURCE_URL = os.environ.get("SOURCE_URL", "")
-CALLBACK = os.environ["CALLBACK_URL"]
+CALLBACK = os.environ["CALLBACK_URL"].strip()
 SECRET = os.environ["CALLBACK_SECRET"]
 R2_ENDPOINT = os.environ["R2_ENDPOINT"]
 R2_BUCKET = os.environ.get("R2_BUCKET", "dakshmusic3-audio")
 R2_ACCESS_KEY = os.environ["R2_ACCESS_KEY"]
 R2_SECRET = os.environ["R2_SECRET_KEY"]
 
+# The Worker callback endpoint is /api/v1/acquire/callback.
+# Accept the previous /api/v1/worker/callback value as well so an existing
+# CALLBACK_URL secret does not need to be recreated.
+if CALLBACK.rstrip("/").endswith("/api/v1/worker/callback"):
+    parts = urlsplit(CALLBACK)
+    CALLBACK = urlunsplit((parts.scheme, parts.netloc, "/api/v1/acquire/callback", parts.query, parts.fragment))
+
 
 def callback(status: str, **extra):
     payload = {"job_id": JOB_ID, "status": status, **extra}
-    response = requests.post(CALLBACK, json=payload, headers={"Authorization": f"Bearer {SECRET}"}, timeout=30)
-    response.raise_for_status()
+    response = requests.post(
+        CALLBACK,
+        json=payload,
+        headers={"Authorization": f"Bearer {SECRET}"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Worker callback failed: HTTP {response.status_code}: {response.text[:1000]}")
 
 
 def _run_spotiflac(output: Path):
