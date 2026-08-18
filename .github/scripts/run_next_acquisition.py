@@ -28,13 +28,18 @@ def run_wrangler(sql):
 
 
 def sql(value):
-    return "'" + str(value or "").replace("'", "''") + "'"
+    return "'" + str(value or "").replace("'", "''").replace("\r", " ").replace("\n", " ") + "'"
 
 
 def set_failed(job_id, error):
-    run_wrangler(
-        "UPDATE acquisition_jobs SET status='failed',last_error=" + sql(error) + ",updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id)
-    )
+    # Keep failure text safe for a one-line D1 command and bounded in size.
+    message = str(error or "unknown acquisition failure")[-4000:]
+    try:
+        run_wrangler(
+            "UPDATE acquisition_jobs SET status='failed',last_error=" + sql(message) + ",updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id)
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"Warning: unable to mark job {job_id} failed in D1: {exc}")
 
 
 rows = run_wrangler(
@@ -86,7 +91,8 @@ except Exception as exc:
     raise
 
 try:
-    outcome = json.loads(open(RESULT_FILE, encoding="utf-8").read())
+    with open(RESULT_FILE, encoding="utf-8") as handle:
+        outcome = json.load(handle)
 except Exception as exc:
     outcome = {"status": "failed", "error": f"Missing/invalid acquisition result: {exc}"}
 
@@ -99,13 +105,7 @@ storage_key = outcome.get("storage_key")
 duration = outcome.get("duration_ms")
 size_bytes = outcome.get("size_bytes")
 
-run_wrangler(
-    "UPDATE acquisition_jobs SET status='complete',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id)
-)
-run_wrangler(
-    "UPDATE tracks SET storage_key=" + sql(storage_key) + ",duration_ms=COALESCE(" + sql(duration) + ",duration_ms),storage_status='available',updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(track_id)
-)
-run_wrangler(
-    "INSERT OR REPLACE INTO cache_objects(track_id,scope,scope_id,storage_key,status,size_bytes,last_accessed_at) VALUES (" + sql(track_id) + ",'server',NULL," + sql(storage_key) + ",'available'," + sql(size_bytes) + ",CURRENT_TIMESTAMP)"
-)
+run_wrangler("UPDATE acquisition_jobs SET status='complete',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id))
+run_wrangler("UPDATE tracks SET storage_key=" + sql(storage_key) + ",duration_ms=COALESCE(" + sql(duration) + ",duration_ms),storage_status='available',updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(track_id))
+run_wrangler("INSERT OR REPLACE INTO cache_objects(track_id,scope,scope_id,storage_key,status,size_bytes,last_accessed_at) VALUES (" + sql(track_id) + ",'server',NULL," + sql(storage_key) + ",'available'," + sql(size_bytes) + ",CURRENT_TIMESTAMP)")
 print(f"Completed {job_id}: {storage_key}")
