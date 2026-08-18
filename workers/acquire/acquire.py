@@ -29,88 +29,52 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (dakshmusic3-acquisition)"}
 
 
 def write_result(status: str, **extra):
-    RESULT_FILE.write_text(
-        json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}),
-        encoding="utf-8",
-    )
+    RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
 
 
-# Deezer is metadata-only in acquisition. It is deliberately NOT passed to
-# SpotiFLAC as a download service.
 def _deezer_track() -> dict:
     if SOURCE == "deezer" and SOURCE_ID:
-        response = requests.get(
-            f"https://api.deezer.com/track/{SOURCE_ID}",
-            headers=HEADERS,
-            timeout=20,
-        )
+        response = requests.get(f"https://api.deezer.com/track/{SOURCE_ID}", headers=HEADERS, timeout=20)
         response.raise_for_status()
         track = response.json()
         if track.get("id"):
             return track
-
     if ISRC:
-        response = requests.get(
-            f"https://api.deezer.com/track/isrc:{ISRC}",
-            headers=HEADERS,
-            timeout=20,
-        )
+        response = requests.get(f"https://api.deezer.com/track/isrc:{ISRC}", headers=HEADERS, timeout=20)
         if response.ok:
             track = response.json()
             if track.get("id"):
                 return track
-
     query = f"{TITLE} {ARTIST}".strip()
-    if not query:
-        raise RuntimeError("Cannot resolve Deezer metadata: title and artist are empty")
-
-    response = requests.get(
-        "https://api.deezer.com/search/track",
-        params={"q": query, "limit": 10},
-        headers=HEADERS,
-        timeout=20,
-    )
+    response = requests.get("https://api.deezer.com/search/track", params={"q": query, "limit": 10}, headers=HEADERS, timeout=20)
     response.raise_for_status()
     tracks = response.json().get("data") or []
     if not tracks:
         raise RuntimeError(f"Deezer metadata lookup returned no tracks for {TITLE} / {ARTIST}")
-
-    title_norm = TITLE.casefold().strip()
-    artist_norm = ARTIST.casefold().strip()
-
+    title_norm, artist_norm = TITLE.casefold().strip(), ARTIST.casefold().strip()
     def score(track):
         t = str(track.get("title", "")).casefold().strip()
         a = str((track.get("artist") or {}).get("name", "")).casefold().strip()
         return (2 if t == title_norm else 0) + (2 if a == artist_norm else 0)
-
     return max(tracks, key=score)
 
 
 def _deezer_track_url() -> str:
     track = _deezer_track()
-    track_id = track.get("id")
-    if not track_id:
+    if not track.get("id"):
         raise RuntimeError(f"Deezer metadata has no track id for {TITLE} / {ARTIST}")
-    return f"https://www.deezer.com/track/{track_id}"
+    return f"https://www.deezer.com/track/{track['id']}"
 
 
 def _songlink_links(deezer_url: str) -> dict[str, str]:
-    """Resolve cross-service links from the public Songlink page."""
     try:
-        response = requests.get(
-            "https://song.link/",
-            params={"url": deezer_url},
-            headers=HEADERS,
-            timeout=20,
-            allow_redirects=True,
-        )
+        response = requests.get("https://song.link/", params={"url": deezer_url}, headers=HEADERS, timeout=20, allow_redirects=True)
         if not response.ok:
             return {}
         html = response.text
     except requests.RequestException:
         return {}
-
-    links: dict[str, str] = {}
+    links = {}
     patterns = {
         "spotify": r'https?:\\?/\\?/open\\.spotify\\.com\\/(?:intl-[^/\\]+\\/)?track\\/[A-Za-z0-9]+',
         "youtube": r'https?:\\?/\\?/(?:www\\.)?youtube\\.com\\/(?:watch\\?v=|shorts/)[A-Za-z0-9_-]+',
@@ -129,17 +93,8 @@ def _resolve_youtube_url(deezer_url: str) -> str | None:
         return links["youtube_music"]
     if links.get("youtube"):
         return links["youtube"]
-
     query = f"{ISRC} {TITLE} {ARTIST}".strip() if ISRC else f"{TITLE} {ARTIST}".strip()
-    command = [
-        "yt-dlp",
-        f"ytsearch1:{query}",
-        "--flat-playlist",
-        "--print",
-        "%(webpage_url)s",
-        "--skip-download",
-        "--no-warnings",
-    ]
+    command = ["yt-dlp", f"ytsearch1:{query}", "--flat-playlist", "--print", "%(webpage_url)s", "--skip-download", "--no-warnings"]
     completed = subprocess.run(command, text=True, capture_output=True, timeout=90)
     if completed.returncode:
         return None
@@ -150,26 +105,15 @@ def _resolve_youtube_url(deezer_url: str) -> str | None:
     return None
 
 
-def _download_spotiflac(url: str, output: Path, services: list[str]) -> None:
+def _download_spotiflac(url: str, output: Path) -> None:
     import asyncio
     import glob
     from SpotiFLAC.client import AsyncSpotiFLAC
-
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
-
     async def download():
-        async with AsyncSpotiFLAC(
-            output_dir=str(outdir),
-            services=services,
-            quality="LOSSLESS",
-            track_max_retries=2,
-            timeout_s=180,
-            embed_lyrics=False,
-            use_extensions_fallback=False,
-        ) as client:
+        async with AsyncSpotiFLAC(output_dir=str(outdir), services=["tidal", "qobuz", "amazon"], quality="LOSSLESS", track_max_retries=2, timeout_s=180, embed_lyrics=False, use_extensions_fallback=False) as client:
             await client.download_track(url)
-
     asyncio.run(download())
     files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
     if not files:
@@ -178,41 +122,25 @@ def _download_spotiflac(url: str, output: Path, services: list[str]) -> None:
 
 
 def _run_spotiflac(output: Path):
-    # Deezer is used only to obtain canonical metadata/ISRC and a stable
-    # cross-service reference. It is NOT a SpotiFLAC download provider.
     deezer_url = _deezer_track_url()
-    links = _songlink_links(deezer_url)
-    spotify_url = links.get("spotify")
-
-    # Primary: Spotify -> SpotiFLAC. Deezer is intentionally excluded from
-    # the provider list; use other lossless providers instead.
+    spotify_url = _songlink_links(deezer_url).get("spotify")
     if spotify_url:
         print(f"SpotiFLAC input: Spotify {spotify_url}")
         try:
-            _download_spotiflac(spotify_url, output, ["tidal", "qobuz", "amazon"])
+            _download_spotiflac(spotify_url, output)
             return
         except Exception as exc:
             print(f"Spotify acquisition failed for {TITLE} / {ARTIST}: {exc}")
-            print("Falling back to YouTube Music")
-
-    # Fallback: YouTube Music/YouTube -> SpotiFLAC.
     youtube_url = _resolve_youtube_url(deezer_url)
     if not youtube_url:
         raise RuntimeError(f"No Spotify or YouTube mapping for {TITLE} / {ARTIST}")
-
-    print(f"SpotiFLAC input: YouTube {youtube_url}")
-    _download_spotiflac(youtube_url, output, ["youtube"])
+    print(f"YouTube fallback: {youtube_url}")
+    _run_ytdlp(output, youtube_url)
 
 
 def _run_ytdlp(output: Path, target_url: str | None = None):
     target = target_url or (f"ytsearch5:{ISRC} {TITLE} {ARTIST}" if ISRC else f"ytsearch5:{TITLE} {ARTIST}")
-    command = [
-        "yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best",
-        "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata",
-        "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno",
-        "--remote-components", "ejs:github", "-o", str(output.with_suffix(".%(ext)s")),
-        "--no-warnings",
-    ]
+    command = ["yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best", "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno", "--remote-components", "ejs:github", "-o", str(output.with_suffix(".%(ext)s")), "--no-warnings"]
     cookies_b64 = os.environ.get("YTDLP_COOKIES_B64")
     cookies_path = None
     if cookies_b64:
@@ -239,11 +167,7 @@ def _run_ytdlp(output: Path, target_url: str | None = None):
 
 def duration_ms(path: Path) -> int | None:
     try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            text=True, capture_output=True, check=True, timeout=30,
-        )
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True, capture_output=True, check=True, timeout=30)
         return int(float(result.stdout.strip()) * 1000)
     except Exception:
         return None
@@ -260,12 +184,7 @@ def main():
             if output.stat().st_size < 1024:
                 raise RuntimeError("acquired FLAC is unexpectedly small")
             import boto3
-            client = boto3.client(
-                "s3", endpoint_url=R2_ENDPOINT,
-                aws_access_key_id=R2_ACCESS_KEY,
-                aws_secret_access_key=R2_SECRET,
-                region_name="auto",
-            )
+            client = boto3.client("s3", endpoint_url=R2_ENDPOINT, aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET, region_name="auto")
             key = f"audio/tracks/{TRACK_ID}.flac"
             size_bytes = output.stat().st_size
             duration = duration_ms(output)
