@@ -1,5 +1,5 @@
-const SEED_CHUNK_SIZE = 5
-const METADATA_CHUNK_SIZE = 1
+const SEED_CHUNK_SIZE = 25
+const METADATA_CHUNK_SIZE = 25
 
 function parseCsv(text) {
   const rows = []
