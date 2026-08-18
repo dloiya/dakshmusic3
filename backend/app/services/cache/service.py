@@ -18,13 +18,13 @@ class CacheService:
         return await self.cache.status()
 
     async def populate(self, limit=None):
-        """Start one background GitHub job for top-cache population.
+        """Start one background GitHub job for Top Cache population.
 
-        The previous implementation synchronously dispatched one GitHub
-        Actions workflow per track from the HTTP Worker. Large top-cache
-        populations could therefore exhaust Worker CPU/resources. The HTTP
-        request now does one dispatch only; the GitHub runner performs the
-        D1 selection and individual acquisition dispatches asynchronously.
+        The old implementation dispatched one acquisition workflow per track
+        from the HTTP Worker. For a 100-track cache that made the request do a
+        large synchronous loop and could exhaust Worker CPU/resources. Now the
+        Worker performs one cheap candidate query and one workflow dispatch;
+        the GitHub runner performs the acquisition loop asynchronously.
         """
         requested_limit = self.settings.top_cache_limit if limit is None else int(limit)
         requested_limit = max(1, min(requested_limit, 1000))
@@ -47,7 +47,9 @@ class CacheService:
         return {
             "ok": True,
             "requested": len(candidates),
-            "dispatched": 0,
+            # This is the number handed off to the background workflow, not
+            # the number of GitHub acquisition runs that have already started.
+            "dispatched": len(candidates),
             "workflow_dispatched": True,
-            "message": f"Top Cache population started for up to {len(candidates)} tracks.",
+            "message": f"Top Cache population started for {len(candidates)} tracks.",
         }
