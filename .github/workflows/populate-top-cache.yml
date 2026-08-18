@@ -22,8 +22,8 @@ jobs:
         slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
       D1_DATABASE: dakshmusic3
-      CALLBACK_URL: ${{ secrets.DAKSH_WORKER_URL || 'https://dakshmusic3.dakshhloiya.workers.dev' }}/api/v1/worker/callback
-      CALLBACK_SECRET: ${{ secrets.DAKSH_WORKER_CALLBACK_SECRET }}
+      CALLBACK_URL: ${{ secrets.CALLBACK_URL }}
+      CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
       R2_ENDPOINT: ${{ secrets.DAKSH_R2_ENDPOINT }}
       R2_BUCKET: dakshmusic3-audio
       R2_ACCESS_KEY: ${{ secrets.DAKSH_R2_ACCESS_KEY_ID }}
@@ -46,6 +46,7 @@ jobs:
       - name: Validate callback configuration
         run: |
           echo "CALLBACK_URL=${CALLBACK_URL}"
-          test -n "$CALLBACK_SECRET" || (echo "DAKSH_WORKER_CALLBACK_SECRET is missing" && exit 1)
+          test -n "$CALLBACK_URL" || (echo "CALLBACK_URL is missing" && exit 1)
+          test -n "$CALLBACK_SECRET" || (echo "CALLBACK_SECRET is missing" && exit 1)
       - name: Acquire next queued track
         run: python .github/scripts/run_next_acquisition.py
