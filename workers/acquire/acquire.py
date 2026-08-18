@@ -26,7 +26,10 @@ RESULT_FILE = Path(os.environ.get("RESULT_FILE", "/tmp/acquisition-result.json")
 
 
 def write_result(status: str, **extra):
-    RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
+    RESULT_FILE.write_text(
+        json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}),
+        encoding="utf-8",
+    )
 
 
 def _deezer_track() -> dict:
@@ -55,6 +58,7 @@ def _deezer_track() -> dict:
     query = f"{TITLE} {ARTIST}".strip()
     if not query:
         raise RuntimeError("Cannot resolve Deezer track: title and artist are empty")
+
     response = requests.get(
         "https://api.deezer.com/search/track",
         params={"q": query, "limit": 10},
@@ -86,8 +90,7 @@ def _deezer_track_url() -> str:
 
 
 def _songlink_spotify(deezer_url: str) -> str | None:
-    # Songlink is only a best-effort cross-service resolver. Never make
-    # acquisition depend on a Spotify match being present.
+    # Best-effort only. Acquisition must never depend on Songlink or Spotify.
     try:
         response = requests.get(
             "https://api.song.link/v1-alpha.1/links",
@@ -97,8 +100,7 @@ def _songlink_spotify(deezer_url: str) -> str | None:
         )
         if response.ok:
             data = response.json()
-            entities = data.get("linksByPlatform") or {}
-            spotify = entities.get("spotify") or {}
+            spotify = (data.get("linksByPlatform") or {}).get("spotify") or {}
             if spotify.get("url"):
                 return spotify["url"]
     except Exception:
@@ -114,13 +116,14 @@ def _run_spotiflac(output: Path):
     deezer_url = _deezer_track_url()
     spotify_url = _songlink_spotify(deezer_url)
 
-    # SpotiFLAC cannot accept Deezer URLs as primary input. Use Spotify when
-    # a public cross-service resolver can find one; otherwise fall back to a
-    # title/artist YouTube search rather than requiring Spotify credentials.
-    if spotify_url:
-        resolved = spotify_url
-    else:
-        resolved = f"ytsearch1:{TITLE} {ARTIST}"
+    # SpotiFLAC accepts Spotify as a primary input, but not Deezer URLs.
+    # If the public cross-service resolver cannot provide Spotify, bypass
+    # SpotiFLAC and use yt-dlp directly instead of feeding ytsearch into
+    # SpotiFLAC (which also does not accept ytsearch as a primary URL).
+    if not spotify_url:
+        print(f"No Spotify mapping for {TITLE} / {ARTIST}; falling back to yt-dlp search")
+        _run_ytdlp(output)
+        return
 
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
@@ -135,7 +138,7 @@ def _run_spotiflac(output: Path):
             embed_lyrics=False,
             use_extensions_fallback=False,
         ) as client:
-            await client.download_track(resolved)
+            await client.download_track(spotify_url)
 
     asyncio.run(download())
     files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
@@ -145,8 +148,29 @@ def _run_spotiflac(output: Path):
 
 
 def _run_ytdlp(output: Path):
-    target = SOURCE_URL or f"ytsearch1:{TITLE} {ARTIST}"
-    command = ["yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best", "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno", "--remote-components", "ejs:github", "-o", str(output.with_suffix(".%(ext)s")), "--no-warnings"]
+    # Search by ISRC first because it is the strongest identifier available.
+    # Fall back to exact title + artist when no ISRC is present.
+    if ISRC:
+        target = f"ytsearch5:{ISRC} {TITLE} {ARTIST}"
+    else:
+        target = f"ytsearch5:{TITLE} {ARTIST}"
+
+    command = [
+        "yt-dlp", target,
+        "--no-playlist",
+        "-x",
+        "-f", "bestaudio/best",
+        "--audio-format", "flac",
+        "--audio-quality", "0",
+        "--embed-metadata",
+        "--embed-thumbnail",
+        "--convert-thumbnails", "jpg",
+        "--js-runtimes", "deno",
+        "--remote-components", "ejs:github",
+        "-o", str(output.with_suffix(".%(ext)s")),
+        "--no-warnings",
+    ]
+
     cookies_b64 = os.environ.get("YTDLP_COOKIES_B64")
     cookies_path = None
     if cookies_b64:
@@ -156,24 +180,33 @@ def _run_ytdlp(output: Path):
         cookies_path = Path(name)
         cookies_path.write_bytes(base64.b64decode(cookies_b64))
         command += ["--cookies", str(cookies_path)]
+
     try:
         completed = subprocess.run(command, text=True, capture_output=True, timeout=12 * 60)
         if completed.returncode:
-            raise RuntimeError((completed.stderr[-4000:] or completed.stdout[-4000:] or "yt-dlp failed").replace("\n", " "))
+            raise RuntimeError(
+                (completed.stderr[-4000:] or completed.stdout[-4000:] or "yt-dlp failed")
+                .replace("\n", " ")
+            )
     finally:
         if cookies_path:
             cookies_path.unlink(missing_ok=True)
+
     if not output.exists():
         candidates = list(output.parent.glob(output.stem + ".flac"))
         if candidates:
             shutil.move(candidates[0], output)
     if not output.exists():
-        raise RuntimeError("yt-dlp produced no FLAC")
+        raise RuntimeError(f"yt-dlp produced no FLAC for {TITLE} / {ARTIST}")
 
 
 def duration_ms(path: Path) -> int | None:
     try:
-        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True, capture_output=True, check=True, timeout=30)
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            text=True, capture_output=True, check=True, timeout=30,
+        )
         return int(float(result.stdout.strip()) * 1000)
     except Exception:
         return None
@@ -187,14 +220,25 @@ def main():
                 _run_spotiflac(output)
             else:
                 _run_ytdlp(output)
+
             if output.stat().st_size < 1024:
                 raise RuntimeError("acquired FLAC is unexpectedly small")
+
             import boto3
-            client = boto3.client("s3", endpoint_url=R2_ENDPOINT, aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET, region_name="auto")
+            client = boto3.client(
+                "s3",
+                endpoint_url=R2_ENDPOINT,
+                aws_access_key_id=R2_ACCESS_KEY,
+                aws_secret_access_key=R2_SECRET,
+                region_name="auto",
+            )
             key = f"audio/tracks/{TRACK_ID}.flac"
             size_bytes = output.stat().st_size
             duration = duration_ms(output)
-            client.upload_file(str(output), R2_BUCKET, key, ExtraArgs={"ContentType": "audio/flac"})
+            client.upload_file(
+                str(output), R2_BUCKET, key,
+                ExtraArgs={"ContentType": "audio/flac"},
+            )
             write_result("complete", storage_key=key, duration_ms=duration, size_bytes=size_bytes)
         except Exception as exc:
             write_result("failed", error=str(exc).replace("\n", " ")[-4000:])
