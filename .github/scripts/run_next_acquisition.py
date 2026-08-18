@@ -13,16 +13,33 @@ def run_wrangler(sql):
     result = subprocess.run(command, check=True, text=True, capture_output=True)
     payload = json.loads(result.stdout)
 
+    # Wrangler/D1 can return:
+    #   [{"results": [...], ...}]
+    #   {"results": [...]}
+    #   {"result": [...]}
+    # Normalize all of these to a plain list of rows.
     if isinstance(payload, list):
-        rows = payload
-    elif isinstance(payload, dict):
-        rows = payload.get("results") or payload.get("result") or []
-        if isinstance(rows, dict):
-            rows = rows.get("results") or rows.get("result") or []
-    else:
-        rows = []
+        if len(payload) == 1 and isinstance(payload[0], dict):
+            item = payload[0]
+            rows = item.get("results") or item.get("result")
+            if isinstance(rows, list):
+                return rows
+            if isinstance(rows, dict):
+                nested = rows.get("results") or rows.get("result")
+                if isinstance(nested, list):
+                    return nested
+        return payload
 
-    return rows if isinstance(rows, list) else []
+    if isinstance(payload, dict):
+        rows = payload.get("results") or payload.get("result")
+        if isinstance(rows, list):
+            return rows
+        if isinstance(rows, dict):
+            nested = rows.get("results") or rows.get("result")
+            if isinstance(nested, list):
+                return nested
+
+    return []
 
 
 def sql(value):
