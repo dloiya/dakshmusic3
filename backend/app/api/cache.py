@@ -11,12 +11,12 @@ router=APIRouter(prefix="/cache",tags=["cache"])
 def get_cache(settings:Settings=Depends(get_settings),db:D1Repository=Depends(get_db))->CacheService:
     jobs=AcquisitionRepository(db)
     acquisition=AcquisitionService(settings,jobs,LibraryRepository(db))
-    return CacheService(CacheRepository(db),jobs,acquisition)
+    return CacheService(CacheRepository(db),jobs,acquisition,settings)
 
 @router.get("/status")
 async def cache_status(service:CacheService=Depends(get_cache)):
     return await service.status()
 
 @router.post("/populate")
-async def populate_cache(limit:int=100,service:CacheService=Depends(get_cache)):
+async def populate_cache(limit:int|None=None,service:CacheService=Depends(get_cache)):
     return await service.populate(limit)
