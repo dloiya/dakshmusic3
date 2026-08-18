@@ -4,21 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: Maximum number of Top Cache tracks to queue
-        required: true
-        default: '100'
+        description: Maximum number of queued acquisition jobs to dispatch
+        required: false
+        default: '10'
         type: string
+  schedule:
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
   actions: write
 
 jobs:
-  populate:
+  dispatch:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
-      LIMIT: ${{ inputs.limit }}
+      QUEUE_LIMIT: ${{ inputs.limit || '10' }}
       D1_DATABASE: dakshmusic3
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -26,10 +28,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Run Top Cache population
+      - name: Dispatch queued acquisitions
         run: |
           npx --yes wrangler@latest d1 info "$D1_DATABASE" --remote --json >/dev/null
-          python .github/scripts/populate_top_cache.py
+          python .github/scripts/dispatch_acquisition_queue.py
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
