@@ -13,7 +13,6 @@ def run_wrangler(sql):
     result = subprocess.run(command, check=True, text=True, capture_output=True)
     payload = json.loads(result.stdout)
 
-    # Wrangler/D1 --json may return either a top-level list or a wrapped object.
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict):
@@ -23,10 +22,7 @@ def run_wrangler(sql):
     else:
         rows = []
 
-    if not isinstance(rows, list):
-        rows = [rows]
-
-    return rows
+    return rows if isinstance(rows, list) else []
 
 
 def sql(value):
@@ -41,15 +37,19 @@ rows = run_wrangler(
 )
 
 if not rows:
-    print("No queued acquisition jobs.")
+    print("No queued acquisition jobs. Nothing to do.")
     raise SystemExit(0)
 
 job = rows[0]
+if not isinstance(job, dict) or "job_id" not in job or "track_id" not in job:
+    print(f"Unexpected D1 row format: {job!r}")
+    raise SystemExit(2)
+
 job_id = str(job["job_id"])
 track_id = str(job["track_id"])
 
 claimed = run_wrangler(
-    "UPDATE acquisition_jobs SET status='running',attempts=attempts+1," 
+    "UPDATE acquisition_jobs SET status='running',attempts=attempts+1,"
     "updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id) + " AND status='queued' RETURNING id"
 )
 
