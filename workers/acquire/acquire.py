@@ -7,12 +7,15 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import requests
+
 JOB_ID = os.environ["JOB_ID"]
 TRACK_ID = os.environ["TRACK_ID"]
 TITLE = os.environ.get("TITLE", "")
 ARTIST = os.environ.get("ARTIST", "")
 ALBUM = os.environ.get("ALBUM", "")
 SOURCE = os.environ.get("SOURCE", "")
+SOURCE_ID = os.environ.get("SOURCE_ID", "")
 SOURCE_URL = os.environ.get("SOURCE_URL", "")
 R2_ENDPOINT = os.environ["R2_ENDPOINT"]
 R2_BUCKET = os.environ.get("R2_BUCKET", "dakshmusic3-audio")
@@ -25,24 +28,68 @@ def write_result(status: str, **extra):
     RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
 
 
+def _deezer_track_url() -> str:
+    if SOURCE == "deezer" and SOURCE_ID:
+        return f"https://www.deezer.com/track/{SOURCE_ID}"
+
+    query = f"{TITLE} {ARTIST}".strip()
+    if not query:
+        raise RuntimeError("Cannot resolve Deezer track: title and artist are empty")
+
+    response = requests.get(
+        "https://api.deezer.com/search/track",
+        params={"q": query, "limit": 10},
+        headers={"User-Agent": "dakshmusic3-acquisition"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    tracks = response.json().get("data") or []
+    if not tracks:
+        raise RuntimeError(f"Deezer search returned no tracks for {TITLE} / {ARTIST}")
+
+    title_norm = TITLE.casefold().strip()
+    artist_norm = ARTIST.casefold().strip()
+
+    def score(track):
+        t = str(track.get("title", "")).casefold().strip()
+        a = str((track.get("artist") or {}).get("name", "")).casefold().strip()
+        return (2 if t == title_norm else 0) + (2 if a == artist_norm else 0)
+
+    track = max(tracks, key=score)
+    track_id = track.get("id")
+    if not track_id:
+        raise RuntimeError(f"Deezer returned a track without an id for {TITLE} / {ARTIST}")
+    return f"https://www.deezer.com/track/{track_id}"
+
+
 def _run_spotiflac(output: Path):
-    from resolve_apple import resolve
     import asyncio
     import glob
     from SpotiFLAC.client import AsyncSpotiFLAC
 
-    resolved = SOURCE_URL if "music.apple.com" in SOURCE_URL else resolve(TITLE, ARTIST, ALBUM, SOURCE_URL)
+    # Never feed Apple Music URLs to SpotiFLAC's Apple metadata resolver.
+    # Resolve Apple-origin jobs to Deezer first so SpotiFLAC stays on its
+    # supported lossless provider path.
+    resolved = _deezer_track_url() if "music.apple.com" in SOURCE_URL or SOURCE != "deezer" else SOURCE_URL
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
 
     async def download():
-        async with AsyncSpotiFLAC(output_dir=str(outdir), services=["deezer", "tidal", "qobuz", "amazon"], quality="LOSSLESS", track_max_retries=2, timeout_s=180, embed_lyrics=False, use_extensions_fallback=False) as client:
+        async with AsyncSpotiFLAC(
+            output_dir=str(outdir),
+            services=["deezer", "tidal", "qobuz", "amazon"],
+            quality="LOSSLESS",
+            track_max_retries=2,
+            timeout_s=180,
+            embed_lyrics=False,
+            use_extensions_fallback=False,
+        ) as client:
             await client.download_track(resolved)
 
     asyncio.run(download())
     files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
     if not files:
-        raise RuntimeError("SpotiFLAC produced no FLAC")
+        raise RuntimeError(f"SpotiFLAC produced no FLAC for {TITLE} / {ARTIST}")
     shutil.copy2(max(files, key=lambda p: p.stat().st_mtime), output)
 
 
@@ -61,7 +108,7 @@ def _run_ytdlp(output: Path):
     try:
         completed = subprocess.run(command, text=True, capture_output=True, timeout=12 * 60)
         if completed.returncode:
-            raise RuntimeError(completed.stderr[-4000:] or completed.stdout[-4000:] or "yt-dlp failed")
+            raise RuntimeError((completed.stderr[-4000:] or completed.stdout[-4000:] or "yt-dlp failed").replace("\n", " "))
     finally:
         if cookies_path:
             cookies_path.unlink(missing_ok=True)
@@ -85,8 +132,6 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         output = Path(tmp) / "audio.flac"
         try:
-            # Apple Music URLs are not supported by yt-dlp. Route them through
-            # the lossless resolver instead.
             if SOURCE in {"deezer", "spotiflac"} or "music.apple.com" in SOURCE_URL:
                 _run_spotiflac(output)
             else:
@@ -101,7 +146,7 @@ def main():
             client.upload_file(str(output), R2_BUCKET, key, ExtraArgs={"ContentType": "audio/flac"})
             write_result("complete", storage_key=key, duration_ms=duration, size_bytes=size_bytes)
         except Exception as exc:
-            write_result("failed", error=str(exc)[-4000:])
+            write_result("failed", error=str(exc).replace("\n", " ")[-4000:])
             raise
 
 
