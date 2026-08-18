@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -15,50 +14,51 @@ TRACK_ID = os.environ["TRACK_ID"]
 TITLE = os.environ.get("TITLE", "")
 ARTIST = os.environ.get("ARTIST", "")
 ALBUM = os.environ.get("ALBUM", "")
-ISRC = os.environ.get("ISRC", "")
 SOURCE = os.environ.get("SOURCE", "")
 SOURCE_ID = os.environ.get("SOURCE_ID", "")
 SOURCE_URL = os.environ.get("SOURCE_URL", "")
+ISRC = os.environ.get("ISRC", "")
 R2_ENDPOINT = os.environ["R2_ENDPOINT"]
 R2_BUCKET = os.environ.get("R2_BUCKET", "dakshmusic3-audio")
 R2_ACCESS_KEY = os.environ["R2_ACCESS_KEY"]
 R2_SECRET = os.environ["R2_SECRET_KEY"]
 RESULT_FILE = Path(os.environ.get("RESULT_FILE", "/tmp/acquisition-result.json"))
 
-HTTP_HEADERS = {"User-Agent": "dakshmusic3-acquisition/1.0"}
-
 
 def write_result(status: str, **extra):
-    RESULT_FILE.write_text(
-        json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}),
-        encoding="utf-8",
-    )
+    RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
 
 
-def _deezer_track_url() -> str:
+def _deezer_track() -> dict:
     if SOURCE == "deezer" and SOURCE_ID:
-        return f"https://www.deezer.com/track/{SOURCE_ID}"
+        response = requests.get(
+            f"https://api.deezer.com/track/{SOURCE_ID}",
+            headers={"User-Agent": "dakshmusic3-acquisition"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        track = response.json()
+        if track.get("id"):
+            return track
 
-    # Prefer the canonical ISRC lookup. This avoids ambiguous title searches.
     if ISRC:
         response = requests.get(
             f"https://api.deezer.com/track/isrc:{ISRC}",
-            headers=HTTP_HEADERS,
+            headers={"User-Agent": "dakshmusic3-acquisition"},
             timeout=20,
         )
         if response.ok:
             track = response.json()
             if track.get("id"):
-                return f"https://www.deezer.com/track/{track['id']}"
+                return track
 
     query = f"{TITLE} {ARTIST}".strip()
     if not query:
         raise RuntimeError("Cannot resolve Deezer track: title and artist are empty")
-
     response = requests.get(
         "https://api.deezer.com/search/track",
         params={"q": query, "limit": 10},
-        headers=HTTP_HEADERS,
+        headers={"User-Agent": "dakshmusic3-acquisition"},
         timeout=20,
     )
     response.raise_for_status()
@@ -74,44 +74,36 @@ def _deezer_track_url() -> str:
         a = str((track.get("artist") or {}).get("name", "")).casefold().strip()
         return (2 if t == title_norm else 0) + (2 if a == artist_norm else 0)
 
-    track = max(tracks, key=score)
+    return max(tracks, key=score)
+
+
+def _deezer_track_url() -> str:
+    track = _deezer_track()
     track_id = track.get("id")
     if not track_id:
         raise RuntimeError(f"Deezer returned a track without an id for {TITLE} / {ARTIST}")
     return f"https://www.deezer.com/track/{track_id}"
 
 
-def _deezer_to_spotify(deezer_url: str) -> str:
-    """Resolve a Deezer track to a Spotify URL without Spotify credentials.
-
-    Songlink's public landing pages remain available even though its old
-    public API has been retired. A Deezer track can be addressed directly as
-    /d/<deezer-track-id>; the rendered page contains the matched Spotify URL.
-    """
-    match = re.search(r"/track/(\d+)", deezer_url)
-    if not match:
-        raise RuntimeError(f"Invalid Deezer track URL: {deezer_url}")
-
-    deezer_id = match.group(1)
-    page_url = f"https://song.link/d/{deezer_id}"
-    response = requests.get(page_url, headers=HTTP_HEADERS, timeout=20, allow_redirects=True)
-    response.raise_for_status()
-
-    spotify_matches = re.findall(
-        r"https?://open\.spotify\.com/track/[A-Za-z0-9]+(?:\?[^\"'<>\\s]*)?",
-        response.text,
-    )
-    if spotify_matches:
-        return spotify_matches[0]
-
-    # Some rendered pages expose Spotify as a spotify: URI.
-    uri_matches = re.findall(r"spotify:track:([A-Za-z0-9]+)", response.text)
-    if uri_matches:
-        return f"https://open.spotify.com/track/{uri_matches[0]}"
-
-    raise RuntimeError(
-        f"No Spotify match found on Songlink for Deezer track {deezer_id} ({TITLE} / {ARTIST})"
-    )
+def _songlink_spotify(deezer_url: str) -> str | None:
+    # Songlink is only a best-effort cross-service resolver. Never make
+    # acquisition depend on a Spotify match being present.
+    try:
+        response = requests.get(
+            "https://api.song.link/v1-alpha.1/links",
+            params={"url": deezer_url},
+            headers={"User-Agent": "dakshmusic3-acquisition"},
+            timeout=20,
+        )
+        if response.ok:
+            data = response.json()
+            entities = data.get("linksByPlatform") or {}
+            spotify = entities.get("spotify") or {}
+            if spotify.get("url"):
+                return spotify["url"]
+    except Exception:
+        pass
+    return None
 
 
 def _run_spotiflac(output: Path):
@@ -119,15 +111,17 @@ def _run_spotiflac(output: Path):
     import glob
     from SpotiFLAC.client import AsyncSpotiFLAC
 
-    # SpotiFLAC does not accept Deezer URLs as primary input. Resolve Deezer
-    # through Songlink to a Spotify URL; no Spotify credentials are required.
-    if SOURCE == "spotiflac" and SOURCE_URL and "open.spotify.com/track/" in SOURCE_URL:
-        resolved = SOURCE_URL
-    else:
-        deezer_url = _deezer_track_url()
-        resolved = _deezer_to_spotify(deezer_url)
+    deezer_url = _deezer_track_url()
+    spotify_url = _songlink_spotify(deezer_url)
 
-    print(f"Resolved source: {resolved}")
+    # SpotiFLAC cannot accept Deezer URLs as primary input. Use Spotify when
+    # a public cross-service resolver can find one; otherwise fall back to a
+    # title/artist YouTube search rather than requiring Spotify credentials.
+    if spotify_url:
+        resolved = spotify_url
+    else:
+        resolved = f"ytsearch1:{TITLE} {ARTIST}"
+
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -152,13 +146,7 @@ def _run_spotiflac(output: Path):
 
 def _run_ytdlp(output: Path):
     target = SOURCE_URL or f"ytsearch1:{TITLE} {ARTIST}"
-    command = [
-        "yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best",
-        "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata",
-        "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno",
-        "--remote-components", "ejs:github", "-o", str(output.with_suffix(".%(ext)s")),
-        "--no-warnings",
-    ]
+    command = ["yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best", "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno", "--remote-components", "ejs:github", "-o", str(output.with_suffix(".%(ext)s")), "--no-warnings"]
     cookies_b64 = os.environ.get("YTDLP_COOKIES_B64")
     cookies_path = None
     if cookies_b64:
@@ -185,11 +173,7 @@ def _run_ytdlp(output: Path):
 
 def duration_ms(path: Path) -> int | None:
     try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            text=True, capture_output=True, check=True, timeout=30,
-        )
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True, capture_output=True, check=True, timeout=30)
         return int(float(result.stdout.strip()) * 1000)
     except Exception:
         return None
@@ -206,17 +190,14 @@ def main():
             if output.stat().st_size < 1024:
                 raise RuntimeError("acquired FLAC is unexpectedly small")
             import boto3
-            client = boto3.client(
-                "s3", endpoint_url=R2_ENDPOINT, aws_access_key_id=R2_ACCESS_KEY,
-                aws_secret_access_key=R2_SECRET, region_name="auto",
-            )
+            client = boto3.client("s3", endpoint_url=R2_ENDPOINT, aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET, region_name="auto")
             key = f"audio/tracks/{TRACK_ID}.flac"
             size_bytes = output.stat().st_size
             duration = duration_ms(output)
             client.upload_file(str(output), R2_BUCKET, key, ExtraArgs={"ContentType": "audio/flac"})
             write_result("complete", storage_key=key, duration_ms=duration, size_bytes=size_bytes)
         except Exception as exc:
-            write_result(status="failed", error=str(exc).replace("\n", " ")[-4000:])
+            write_result("failed", error=str(exc).replace("\n", " ")[-4000:])
             raise
 
 
