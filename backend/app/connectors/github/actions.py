@@ -21,6 +21,7 @@ class GitHubActionsConnector:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
+            "User-Agent": "dakshmusic3",
         }
         payload = {"ref": self.settings.github_ref, "inputs": inputs}
 
