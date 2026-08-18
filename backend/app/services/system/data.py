@@ -12,11 +12,10 @@ from ...repositories import D1Repository, LibraryRepository
 
 
 class DataService:
-    # Keep each HTTP request tiny. D1 work and JSON parsing both count toward
-    # Worker CPU time, and the previous importer became progressively slower
-    # because its identity queries scanned the growing tracks table.
-    SEED_CHUNK_SIZE = 5
-    METADATA_CHUNK_SIZE = 1
+    # Larger chunks reduce per-request Worker overhead. Keep the DB work in a
+    # single batch so we do not create hundreds of tiny Worker invocations.
+    SEED_CHUNK_SIZE = 25
+    METADATA_CHUNK_SIZE = 25
 
     METADATA_COLUMNS = (
         "Deezer Found", "Deezer Match Type", "Deezer Track ID", "Deezer Track Name",
@@ -117,27 +116,32 @@ class DataService:
         }
 
     async def enrich_metadata_chunk(self, rows):
-        # Metadata is already in the new CSV. Never call Deezer from this path.
         if not rows or len(rows) > self.METADATA_CHUNK_SIZE:
             raise ValueError(f"metadata chunk must contain 1-{self.METADATA_CHUNK_SIZE} rows")
-        track = self._track(rows[0])
-        if not track.get("metadata_json") and track.get("duration_ms") is None and not track.get("artwork_url"):
-            return {"processed": 1, "enriched": 0}
 
-        # IMPORTANT: use the indexed ISRC path when an ISRC exists. The old
-        # LOWER(TRIM(...)) OR LOWER(isrc) predicate forced table scans.
-        if track.get("isrc"):
-            where = "isrc=?"
-            identity = [track["isrc"]]
-        else:
-            where = "title=? AND artist=? AND COALESCE(album_name,'')=COALESCE(?, '')"
-            identity = [track["title"], track["artist"], track.get("album")]
+        statements = []
+        enriched = 0
+        for row in rows:
+            track = self._track(row)
+            if not track.get("metadata_json") and track.get("duration_ms") is None and not track.get("artwork_url"):
+                continue
 
-        await self.db.execute(
-            f"""UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), album_name=COALESCE(NULLIF(?,''),album_name), metadata_json=COALESCE(?,metadata_json), updated_at=CURRENT_TIMESTAMP WHERE {where}""",
-            [track.get("duration_ms"), track.get("artwork_url"), track.get("source"), track.get("source_id"), track.get("source_url"), track.get("album"), track.get("metadata_json"), *identity],
-        )
-        return {"processed": 1, "enriched": 1}
+            if track.get("isrc"):
+                where = "isrc=?"
+                identity = [track["isrc"]]
+            else:
+                where = "title=? AND artist=? AND COALESCE(album_name,'')=COALESCE(?, '')"
+                identity = [track["title"], track["artist"], track.get("album")]
+
+            statements.append((
+                f"""UPDATE tracks SET duration_ms=COALESCE(?,duration_ms), artwork_url=COALESCE(?,artwork_url), source=COALESCE(?,source), source_id=COALESCE(?,source_id), source_url=COALESCE(?,source_url), album_name=COALESCE(NULLIF(?,''),album_name), metadata_json=COALESCE(?,metadata_json), updated_at=CURRENT_TIMESTAMP WHERE {where}""",
+                [track.get("duration_ms"), track.get("artwork_url"), track.get("source"), track.get("source_id"), track.get("source_url"), track.get("album"), track.get("metadata_json"), *identity],
+            ))
+            enriched += 1
+
+        if statements:
+            await self.db.batch(statements)
+        return {"processed": len(rows), "enriched": enriched}
 
     async def _insert_import_rows(self, job_id, rows):
         tracks = []
@@ -158,9 +162,6 @@ class DataService:
             values = [track["title"], track["artist"], track["album"], track["isrc"], track["duration_ms"], track["artwork_url"], track["source"], track["source_id"], track["source_url"], track["metadata_json"], track["cache"]]
 
             if track.get("isrc"):
-                # Both statements use the indexed isrc column. This replaces
-                # the old OR predicate that became increasingly expensive as
-                # the library grew.
                 statements.append((
                     """UPDATE tracks SET title=?,artist=?,album_name=?,isrc=COALESCE(?,isrc),duration_ms=COALESCE(?,duration_ms),artwork_url=COALESCE(?,artwork_url),source=COALESCE(?,source),source_id=COALESCE(?,source_id),source_url=COALESCE(?,source_url),metadata_json=COALESCE(?,metadata_json),cache_requested=MAX(cache_requested,?),updated_at=CURRENT_TIMESTAMP WHERE isrc=?""",
                     values + [track["isrc"]],
@@ -170,8 +171,6 @@ class DataService:
                     values + [track["isrc"]],
                 ))
             else:
-                # No-ISRC rows use the table's existing UNIQUE(title,artist,album_name)
-                # index and exact equality, avoiding LOWER/TRIM table scans.
                 statements.append((
                     """INSERT INTO tracks(title,artist,album_name,isrc,duration_ms,artwork_url,source,source_id,source_url,metadata_json,cache_requested) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(title,artist,album_name) DO UPDATE SET duration_ms=COALESCE(excluded.duration_ms,tracks.duration_ms),artwork_url=COALESCE(excluded.artwork_url,tracks.artwork_url),source=COALESCE(excluded.source,tracks.source),source_id=COALESCE(excluded.source_id,tracks.source_id),source_url=COALESCE(excluded.source_url,tracks.source_url),metadata_json=COALESCE(excluded.metadata_json,tracks.metadata_json),cache_requested=MAX(tracks.cache_requested,excluded.cache_requested),updated_at=CURRENT_TIMESTAMP""",
                     values,
@@ -198,26 +197,21 @@ class DataService:
         total_imported = job["imported_rows"] + imported
         total_failed = job["failed_rows"] + failed
 
-        # Do NOT rebuild the entire playlist on every import. The previous
-        # final DELETE + INSERT scanned the whole growing library and was the
-        # second major CPU spike. Add only this chunk's tracks.
-        if rows:
-            tracks = [self._track(row) for row in rows]
-            predicates = []
-            params = []
-            for track in tracks:
-                if track.get("isrc"):
-                    predicates.append("t.isrc=?")
-                    params.append(track["isrc"])
-                else:
-                    predicates.append("t.title=? AND t.artist=? AND COALESCE(t.album_name,'')=COALESCE(?, '')")
-                    params.extend([track["title"], track["artist"], track.get("album")])
-            if predicates:
-                # Position is allocated only for tracks not already in the
-                # playlist. The MAX(position) subquery is evaluated once for
-                # this small chunk, not once for the whole library.
-                sql = f"""INSERT OR IGNORE INTO playlist_entries(track_id,position) SELECT t.id, COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1 FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL AND ({' OR '.join(predicates)})"""
-                await self.db.execute(sql, params)
+        # Add playlist entries for this chunk only; never rebuild the whole
+        # playlist at the end of a large import.
+        tracks = [self._track(row) for row in rows]
+        predicates = []
+        params = []
+        for track in tracks:
+            if track.get("isrc"):
+                predicates.append("t.isrc=?")
+                params.append(track["isrc"])
+            else:
+                predicates.append("t.title=? AND t.artist=? AND COALESCE(t.album_name,'')=COALESCE(?, '')")
+                params.extend([track["title"], track["artist"], track.get("album")])
+        if predicates:
+            sql = f"""INSERT OR IGNORE INTO playlist_entries(track_id,position) SELECT t.id, COALESCE((SELECT MAX(position)+1 FROM playlist_entries),0)+ROW_NUMBER() OVER (ORDER BY t.id)-1 FROM tracks t LEFT JOIN playlist_entries p ON p.track_id=t.id WHERE p.track_id IS NULL AND ({' OR '.join(predicates)})"""
+            await self.db.execute(sql, params)
 
         if done:
             await self.db.execute("UPDATE import_jobs SET status='complete',processed_rows=?,imported_rows=?,failed_rows=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", [processed, total_imported, total_failed, job_id])
@@ -227,8 +221,6 @@ class DataService:
         return {"ok": True, "job_id": job_id, "processed": processed, "total": job["total_rows"], "imported": total_imported, "failed": total_failed, "complete": done}
 
     async def import_csv(self, filename: str, content: bytes):
-        # Kept for API compatibility. The React importer uses /seed/chunk so
-        # each request processes only SEED_CHUNK_SIZE rows.
         rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
         job_id = await self.start_import(filename, len(rows))
         for i in range(0, len(rows), self.SEED_CHUNK_SIZE):
