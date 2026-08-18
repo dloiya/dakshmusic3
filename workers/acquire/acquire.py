@@ -74,7 +74,6 @@ def _deezer_track_url() -> str:
 
 
 def _songlink_spotify(deezer_url: str) -> str | None:
-    # Best effort. The old api.song.link endpoint is not treated as required.
     try:
         response = requests.get(
             f"https://song.link/?url={requests.utils.quote(deezer_url, safe='')}",
@@ -116,31 +115,31 @@ def _run_spotiflac(output: Path):
     deezer_url = _deezer_track_url()
     spotify_url = _songlink_spotify(deezer_url)
 
-    # SpotiFLAC requires a real supported URL as its primary input. Never feed
-    # it a Deezer URL or ytsearch pseudo-URL. If Spotify cannot be resolved,
-    # resolve a real YouTube URL first and still let SpotiFLAC perform the
-    # provider/download attempt.
-    if spotify_url:
-        resolved = spotify_url
-        print(f"SpotiFLAC input: Spotify {resolved}")
-    else:
-        resolved = _resolve_youtube_url()
-        print(f"No Spotify mapping for {TITLE} / {ARTIST}; SpotiFLAC input: YouTube {resolved}")
+    # SpotiFLAC's YouTube provider is not installed in the current runner.
+    # Therefore only pass Spotify URLs to SpotiFLAC. If Spotify cannot be
+    # resolved, download the already-resolved YouTube URL directly with
+    # yt-dlp instead of invoking SpotiFLAC with an unsupported provider.
+    if not spotify_url:
+        youtube_url = _resolve_youtube_url()
+        print(f"No Spotify mapping for {TITLE} / {ARTIST}; using yt-dlp directly: {youtube_url}")
+        _run_ytdlp(output, target_url=youtube_url)
+        return
 
+    print(f"SpotiFLAC input: Spotify {spotify_url}")
     outdir = output.parent / "_spotiflac"
     outdir.mkdir(parents=True, exist_ok=True)
 
     async def download():
         async with AsyncSpotiFLAC(
             output_dir=str(outdir),
-            services=["deezer", "tidal", "qobuz", "amazon", "youtube"],
+            services=["deezer", "tidal", "qobuz", "amazon"],
             quality="LOSSLESS",
             track_max_retries=2,
             timeout_s=180,
             embed_lyrics=False,
             use_extensions_fallback=False,
         ) as client:
-            await client.download_track(resolved)
+            await client.download_track(spotify_url)
 
     asyncio.run(download())
     files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
@@ -149,8 +148,8 @@ def _run_spotiflac(output: Path):
     shutil.copy2(max(files, key=lambda p: p.stat().st_mtime), output)
 
 
-def _run_ytdlp(output: Path):
-    target = f"ytsearch5:{ISRC} {TITLE} {ARTIST}" if ISRC else f"ytsearch5:{TITLE} {ARTIST}"
+def _run_ytdlp(output: Path, target_url: str | None = None):
+    target = target_url or (f"ytsearch5:{ISRC} {TITLE} {ARTIST}" if ISRC else f"ytsearch5:{TITLE} {ARTIST}")
     command = ["yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best", "--audio-format", "flac", "--audio-quality", "0", "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg", "--js-runtimes", "deno", "--remote-components", "ejs:github", "-o", str(output.with_suffix(".%(ext)s")), "--no-warnings"]
     cookies_b64 = os.environ.get("YTDLP_COOKIES_B64")
     cookies_path = None
