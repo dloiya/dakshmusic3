@@ -2,8 +2,12 @@ name: Populate Top Cache
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/populate-top-cache.yml'
+      - '.github/scripts/run_next_acquisition.py'
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
 
 permissions:
   contents: read
@@ -14,8 +18,14 @@ concurrency:
 
 jobs:
   acquire-next:
+    name: Acquire queued track ${{ matrix.slot }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
       D1_DATABASE: dakshmusic3
       CALLBACK_URL: ${{ secrets.DAKSH_WORKER_URL }}/api/v1/worker/callback
