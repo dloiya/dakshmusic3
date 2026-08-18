@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     worker_callback_secret: str = ""
     spotiflac_api_url: str = ""
     deezer_api_url: str = "https://api.deezer.com"
-    top_cache_limit: int = 100
+    top_cache_limit: int = 200
     model_config = SettingsConfigDict(env_file=".env", env_prefix="DAKSH_", extra="ignore")
 
 
