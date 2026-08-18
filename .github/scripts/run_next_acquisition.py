@@ -32,7 +32,6 @@ def sql(value):
 
 
 def set_failed(job_id, error):
-    # Keep failure text safe for a one-line D1 command and bounded in size.
     message = str(error or "unknown acquisition failure")[-4000:]
     try:
         run_wrangler(
@@ -43,7 +42,7 @@ def set_failed(job_id, error):
 
 
 rows = run_wrangler(
-    "SELECT j.id AS job_id,j.track_id,t.title,t.artist,t.album_name,t.source,t.source_id,t.source_url "
+    "SELECT j.id AS job_id,j.track_id,t.title,t.artist,t.album_name,t.isrc,t.source,t.source_id,t.source_url "
     "FROM acquisition_jobs j JOIN tracks t ON t.id=j.track_id "
     "WHERE j.status='queued' ORDER BY j.created_at,j.id LIMIT 1"
 )
@@ -77,13 +76,14 @@ env.update({
     "TITLE": str(job.get("title") or ""),
     "ARTIST": str(job.get("artist") or ""),
     "ALBUM": str(job.get("album_name") or ""),
+    "ISRC": str(job.get("isrc") or ""),
     "SOURCE": str(job.get("source") or ""),
     "SOURCE_ID": str(job.get("source_id") or ""),
     "SOURCE_URL": str(job.get("source_url") or ""),
     "RESULT_FILE": RESULT_FILE,
 })
 
-print(f"Acquiring {job_id}: {job.get('title')} / {job.get('artist')}")
+print(f"Acquiring {job_id}: {job.get('title')} / {job.get('artist')} (ISRC={job.get('isrc') or 'none'})")
 try:
     result = subprocess.run(["python", "workers/acquire/acquire.py"], env=env)
 except Exception as exc:
