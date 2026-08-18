@@ -22,7 +22,7 @@ RESULT_FILE = Path(os.environ.get("RESULT_FILE", "/tmp/acquisition-result.json")
 
 
 def write_result(status: str, **extra):
-    RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}))
+    RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
 
 
 def _run_spotiflac(output: Path):
@@ -85,7 +85,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         output = Path(tmp) / "audio.flac"
         try:
-            if SOURCE in {"deezer", "spotiflac"}:
+            # Apple Music URLs are not supported by yt-dlp. Route them through
+            # the lossless resolver instead.
+            if SOURCE in {"deezer", "spotiflac"} or "music.apple.com" in SOURCE_URL:
                 _run_spotiflac(output)
             else:
                 _run_ytdlp(output)
@@ -99,7 +101,7 @@ def main():
             client.upload_file(str(output), R2_BUCKET, key, ExtraArgs={"ContentType": "audio/flac"})
             write_result("complete", storage_key=key, duration_ms=duration, size_bytes=size_bytes)
         except Exception as exc:
-            write_result("failed", error=str(exc))
+            write_result("failed", error=str(exc)[-4000:])
             raise
 
 
