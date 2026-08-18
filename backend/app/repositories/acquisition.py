@@ -15,12 +15,38 @@ class AcquisitionRepository:
         await self.db.execute("INSERT INTO acquisition_jobs(id,track_id,status,worker,attempts) VALUES(?,?,?,?,0)",[job_id,track_id,"queued",worker])
         return job_id,True
 
+    async def create_many(self, track_ids, worker="github-actions"):
+        """Queue many tracks with one D1 batch; safe to repeat."""
+        statements=[]
+        jobs=[]
+        for track_id in track_ids:
+            job_id=str(uuid.uuid4())
+            jobs.append((track_id,job_id))
+            statements.append((
+                "UPDATE tracks SET storage_status='queued',updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND storage_status!='available'",
+                [track_id],
+            ))
+            statements.append((
+                "INSERT INTO acquisition_jobs(id,track_id,status,worker,attempts) "
+                "SELECT ?,?,'queued',?,0 WHERE NOT EXISTS ("
+                "SELECT 1 FROM acquisition_jobs WHERE track_id=? "
+                "AND status IN ('queued','dispatched','running'))",
+                [job_id,track_id,worker,track_id],
+            ))
+        if statements:
+            await self.db.batch(statements)
+        return jobs
+
     async def get(self,job_id):
         return await self.db.one("SELECT j.*,t.title,t.artist,t.album_name,t.artwork_url,t.duration_ms,t.storage_status FROM acquisition_jobs j JOIN tracks t ON t.id=j.track_id WHERE j.id=?",[job_id])
 
     async def list(self,active_only=False):
         where="WHERE j.status IN ('queued','dispatched','running')" if active_only else ""
-        return await self.db.query(f"SELECT j.*,t.title,t.artist,t.album_name,t.artwork_url,t.duration_ms,t.storage_status FROM acquisition_jobs j JOIN tracks t ON t.id=j.track_id {where} ORDER BY j.created_at DESC LIMIT 500")
+        return await self.db.query(f"SELECT j.*,t.title,t.artist,t.album_name,t.artwork_url,t.duration_ms,t.source,t.source_id,t.source_url,t.storage_status FROM acquisition_jobs j JOIN tracks t ON t.id=j.track_id {where} ORDER BY j.created_at DESC LIMIT 500")
+
+    async def queued(self,limit=10):
+        return await self.db.query("SELECT j.*,t.title,t.artist,t.album_name,t.source,t.source_id,t.source_url FROM acquisition_jobs j JOIN tracks t ON t.id=j.track_id WHERE j.status='queued' ORDER BY j.created_at,j.id LIMIT ?",[max(1,min(int(limit),50))])
 
     async def update(self,job_id,status,error=None):
         terminal=status in ("complete","failed","cancelled")
