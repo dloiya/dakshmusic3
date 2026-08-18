@@ -1,4 +1,4 @@
-const SEED_CHUNK_SIZE = 10
+const SEED_CHUNK_SIZE = 5
 const METADATA_CHUNK_SIZE = 1
 
 function parseCsv(text) {
@@ -55,7 +55,6 @@ async function importInChunks(file) {
   const rows = parseCsv(text)
   if (!rows.length) throw new Error('CSV contains no data rows')
 
-  // Phase 1: finish the entire seed before any metadata work starts.
   let jobId = null
   let processed = 0
   for (let i = 0; i < rows.length; i += SEED_CHUNK_SIZE) {
@@ -69,7 +68,6 @@ async function importInChunks(file) {
     updateProgress(processed, rows.length, `Seeding ${processed.toLocaleString()} / ${rows.length.toLocaleString()}…`)
   }
 
-  // Phase 2: metadata starts only after the final seed request succeeds.
   let metadataDone = 0
   let metadataFilled = 0
   for (let i = 0; i < rows.length; i += METADATA_CHUNK_SIZE) {
