@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from ...config import Settings
 from ...repositories import AcquisitionRepository, CacheRepository
-from ...connectors.github.actions import GitHubActionsConnector
 from ..acquisition.acquire import AcquisitionService
 
 
@@ -12,19 +11,17 @@ class CacheService:
         self.acquisition_repo = acquisition_repo
         self.acquisition = acquisition
         self.settings = settings
-        self.github = GitHubActionsConnector(settings)
 
     async def status(self):
         return await self.cache.status()
 
     async def populate(self, limit=None):
-        """Start one background GitHub job for Top Cache population.
+        """Queue Top Cache tracks in D1 and return immediately.
 
-        The old implementation dispatched one acquisition workflow per track
-        from the HTTP Worker. For a 100-track cache that made the request do a
-        large synchronous loop and could exhaust Worker CPU/resources. Now the
-        Worker performs one cheap candidate query and one workflow dispatch;
-        the GitHub runner performs the acquisition loop asynchronously.
+        The HTTP Worker never calls GitHub's API and never dispatches one
+        workflow per track. A scheduled GitHub runner drains the queued jobs
+        asynchronously. This keeps the request cheap and makes repeated
+        Populate clicks idempotent.
         """
         requested_limit = self.settings.top_cache_limit if limit is None else int(limit)
         requested_limit = max(1, min(requested_limit, 1000))
@@ -34,22 +31,20 @@ class CacheService:
             return {
                 "ok": True,
                 "requested": 0,
-                "dispatched": 0,
+                "queued": 0,
                 "workflow_dispatched": False,
                 "message": "No tracks marked for Top Cache are pending acquisition.",
             }
 
-        await self.github.dispatch(
-            self.settings.populate_cache_workflow,
-            {"limit": str(requested_limit)},
+        jobs = await self.acquisition_repo.create_many(
+            [int(track["id"]) for track in candidates],
+            worker="github-actions",
         )
 
         return {
             "ok": True,
             "requested": len(candidates),
-            # This is the number handed off to the background workflow, not
-            # the number of GitHub acquisition runs that have already started.
-            "dispatched": len(candidates),
-            "workflow_dispatched": True,
-            "message": f"Top Cache population started for {len(candidates)} tracks.",
+            "queued": len(jobs),
+            "workflow_dispatched": False,
+            "message": f"Queued {len(candidates)} Top Cache tracks. Background acquisition will process them.",
         }
