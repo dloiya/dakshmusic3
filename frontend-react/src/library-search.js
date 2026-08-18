@@ -1,6 +1,5 @@
-// Lightweight iPod-library search enhancer. It deliberately lives outside the
-// main App component so the existing iPod navigation/wheel behaviour is left
-// untouched. It filters the currently loaded library instantly on the device.
+// Lightweight iPod-library search enhancer. It leaves the existing iPod
+// navigation/wheel component untouched and adds instant client-side search.
 
 const STYLE_ID = 'library-search-style'
 const BAR_ID = 'library-search-bar'
@@ -38,16 +37,17 @@ function ensureBar() {
     bar.id = BAR_ID
     bar.innerHTML = '<input type="search" autocomplete="off" spellcheck="false" placeholder="Search library…" aria-label="Search library">'
     body.prepend(bar)
-    bar.querySelector('input').addEventListener('input', event => {
-      filterRows(event.target.value)
-    })
+    bar.querySelector('input').addEventListener('input', event => filterRows(event.target.value))
   }
 
   const input = bar.querySelector('input')
-  if (input && document.activeElement !== input) {
-    // React may replace the library rows after navigation; reapply the query.
-    filterRows(input.value)
-  }
+  if (input && document.activeElement !== input) filterRows(input.value)
+}
+
+function init() {
+  ensureBar()
+  const root = document.getElementById('root')
+  if (root) observer.observe(root, {subtree: true, childList: true})
 }
 
 const observer = new MutationObserver(() => {
@@ -55,8 +55,8 @@ const observer = new MutationObserver(() => {
   else document.getElementById(BAR_ID)?.remove()
 })
 
-window.addEventListener('DOMContentLoaded', () => {
-  ensureBar()
-  const root = document.getElementById('root')
-  if (root) observer.observe(root, {subtree: true, childList: true})
-})
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', init, {once: true})
+} else {
+  queueMicrotask(init)
+}
