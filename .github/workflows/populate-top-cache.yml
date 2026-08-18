@@ -2,36 +2,45 @@ name: Populate Top Cache
 
 on:
   workflow_dispatch:
-    inputs:
-      limit:
-        description: Maximum number of queued acquisition jobs to dispatch
-        required: false
-        default: '10'
-        type: string
   schedule:
     - cron: '*/5 * * * *'
 
 permissions:
   contents: read
-  actions: write
+
+concurrency:
+  group: dakshmusic3-acquisition-queue
+  cancel-in-progress: false
 
 jobs:
-  dispatch:
+  acquire-next:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     env:
-      QUEUE_LIMIT: ${{ inputs.limit || '10' }}
       D1_DATABASE: dakshmusic3
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CALLBACK_URL: ${{ secrets.DAKSH_WORKER_URL }}/api/v1/worker/callback
+      CALLBACK_SECRET: ${{ secrets.DAKSH_WORKER_CALLBACK_SECRET }}
+      R2_ENDPOINT: ${{ secrets.DAKSH_R2_ENDPOINT }}
+      R2_BUCKET: dakshmusic3-audio
+      R2_ACCESS_KEY: ${{ secrets.DAKSH_R2_ACCESS_KEY_ID }}
+      R2_SECRET_KEY: ${{ secrets.DAKSH_R2_SECRET_ACCESS_KEY }}
+      YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Dispatch queued acquisitions
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Install acquisition dependencies
         run: |
-          npx --yes wrangler@latest d1 info "$D1_DATABASE" --remote --json >/dev/null
-          python .github/scripts/dispatch_acquisition_queue.py
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          python -m pip install --upgrade pip
+          pip install yt-dlp boto3 requests spotiflac
+      - name: Acquire next queued track
+        run: python .github/scripts/run_next_acquisition.py
