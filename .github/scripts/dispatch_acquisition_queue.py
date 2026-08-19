@@ -11,10 +11,7 @@ REF = os.environ.get("GITHUB_REF_NAME", "main")
 
 
 def run_wranger(sql):
-    command = [
-        "npx", "wrangler", "d1", "execute", DB,
-        "--remote", "--json", "--command", sql,
-    ]
+    command = ["npx", "wrangler", "d1", "execute", DB, "--remote", "--json", "--command", sql]
     result = subprocess.run(command, check=True, text=True, capture_output=True)
     payload = json.loads(result.stdout)
     rows = payload.get("results") or payload.get("result") or []
@@ -28,7 +25,7 @@ def sql(value):
 
 
 query = f"""
-SELECT j.id AS job_id,j.track_id,t.title,t.artist,t.album_name,
+SELECT j.id AS job_id,j.track_id,t.title,t.artist,t.album_name,t.isrc,
        t.source,t.source_id,t.source_url
 FROM acquisition_jobs j
 JOIN tracks t ON t.id=j.track_id
@@ -38,7 +35,6 @@ LIMIT {LIMIT}
 """.strip()
 
 rows = run_wranger(query)
-
 if not rows:
     print("No queued acquisition jobs.")
     raise SystemExit(0)
@@ -54,6 +50,7 @@ for track in rows:
             "title": str(track.get("title") or ""),
             "artist": str(track.get("artist") or ""),
             "album": str(track.get("album_name") or ""),
+            "isrc": str(track.get("isrc") or ""),
             "source": str(track.get("source") or ""),
             "source_id": str(track.get("source_id") or ""),
             "source_url": str(track.get("source_url") or ""),
@@ -81,12 +78,10 @@ for track in rows:
         print(f"Dispatch failed for job {track['job_id']}: {exc}")
         continue
 
-    # Only mark the job dispatched after GitHub accepted the workflow.
     run_wranger(
-        "UPDATE acquisition_jobs SET status='dispatched',attempts=attempts+1," 
+        "UPDATE acquisition_jobs SET status='dispatched',attempts=attempts+1,"
         "updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(track["job_id"]) + ";"
     )
-
     print(f"Dispatched {track['job_id']} — {track.get('title')} / {track.get('artist')}")
 
 print(f"Processed {len(rows)} queued acquisition jobs.")
