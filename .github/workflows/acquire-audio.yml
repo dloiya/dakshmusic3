@@ -34,6 +34,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SPOTIFLAC_REGISTRIES: https://raw.githubusercontent.com/spotiflacapp/SpotiFLAC-Extension/main/registry.json
+
 jobs:
   acquire:
     runs-on: ubuntu-latest
@@ -55,7 +58,6 @@ jobs:
       R2_ACCESS_KEY: ${{ secrets.DAKSH_R2_ACCESS_KEY_ID }}
       R2_SECRET_KEY: ${{ secrets.DAKSH_R2_SECRET_ACCESS_KEY }}
       YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
-      SPOTIFLAC_REGISTRIES: https://raw.githubusercontent.com/spotiflacapp/SpotiFLAC-Extension/main/registry.json
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +65,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - uses: denoland/setup-deno@v2
         with:
@@ -73,64 +79,69 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade yt-dlp boto3 requests spotiflac
 
-      - name: Configure SpotiFLAC extension registry
+      - name: Configure SpotiFLAC registry
         shell: bash
         run: |
           set -euo pipefail
-
-          # SpotiFLAC reads this file during initialization. Keep both the
-          # process environment and the persistent config file populated.
           printf 'SPOTIFLAC_REGISTRIES=%s\n' "$SPOTIFLAC_REGISTRIES" > "$HOME/.spotiflac_env"
-          printf 'SPOTIFLAC_REGISTRIES=%s\n' "$SPOTIFLAC_REGISTRIES" > "$GITHUB_ENV"
-
-          echo "SpotiFLAC registry: $SPOTIFLAC_REGISTRIES"
+          echo "SPOTIFLAC_REGISTRIES=$SPOTIFLAC_REGISTRIES" >> "$GITHUB_ENV"
           curl --fail --location --retry 3 --retry-delay 2 --silent --show-error \
             "$SPOTIFLAC_REGISTRIES" -o /tmp/spotiflac-registry.json
 
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          registry = json.loads(Path('/tmp/spotiflac-registry.json').read_text())
-          extensions = registry.get('extensions') or []
-          wanted = {'tidal-web', 'qobuz-web', 'amazon'}
-          found = {str(x.get('id')) for x in extensions if isinstance(x, dict)}
-          print('Registry extensions:', ', '.join(sorted(found)))
-          missing = wanted - found
-          if missing:
-              raise SystemExit(f'Missing required SpotiFLAC extensions from registry: {sorted(missing)}')
-          PY
-
-      - name: Preload SpotiFLAC extensions
+      - name: Install SpotiFLAC download extensions
         shell: bash
         run: |
           set -euo pipefail
-
-          # Trigger the Python module's extension manager once before the
-          # acquisition process. The module downloads and caches the matching
-          # JS extensions from SPOTIFLAC_REGISTRIES.
           python - <<'PY'
-          import asyncio
           import os
-          from SpotiFLAC.client import AsyncSpotiFLAC
+          from SpotiFLAC.extensions.manager import ExtensionManager
 
-          async def main():
-              print('SPOTIFLAC_REGISTRIES =', os.environ.get('SPOTIFLAC_REGISTRIES'))
-              async with AsyncSpotiFLAC(
-                  output_dir='/tmp/spotiflac-preload',
-                  services=['tidal', 'qobuz', 'amazon'],
-                  use_extensions_fallback=True,
-              ):
-                  print('SpotiFLAC extension manager initialized.')
+          registry = os.environ["SPOTIFLAC_REGISTRIES"]
+          manager = ExtensionManager(auto_install_downloads=False)
+          print(f"Installing SpotiFLAC extensions from: {registry}")
 
-          asyncio.run(main())
+          entries = manager.fetch_registry(registry)
+          targets = {
+              e.id: e for e in entries
+              if e.id in {"tidal-web", "qobuz-web", "amazon"}
+          }
+          print("Registry targets:", sorted(targets))
+
+          missing = {"tidal-web", "qobuz-web", "amazon"} - set(targets)
+          if missing:
+              raise RuntimeError(f"Required extensions missing from registry: {sorted(missing)}")
+
+          for name in ("tidal-web", "qobuz-web", "amazon"):
+              entry = targets[name]
+              installed = manager.get_installed(name)
+              if installed and installed.version == entry.version:
+                  print(f"Already installed: {name} v{installed.version}")
+                  continue
+              print(f"Downloading/installing: {name} v{entry.version}")
+              manager.install_from_url(entry.download_url, sha256=entry.sha256)
+
+          installed = manager.get_installed()
+          print("Installed extensions:")
+          for ext in installed:
+              print(f"  - {ext.name} v{ext.version} [{ext.ext_dir}]")
+
+          installed_names = {ext.name for ext in installed}
+          required = {"tidal-web", "qobuz-web", "amazon"}
+          missing = required - installed_names
+          if missing:
+              raise RuntimeError(f"Extension installation verification failed: {sorted(missing)}")
           PY
 
-      - name: Verify extension cache
+      - name: Verify SpotiFLAC extension files
         shell: bash
         run: |
           set -euo pipefail
-          echo "SpotiFLAC cache/config paths:"
-          find "$HOME/.spotiflac" "$HOME/.cache/spotiflac" -maxdepth 4 -type f 2>/dev/null | sort | head -200 || true
+          for ext in tidal-web qobuz-web amazon; do
+            dir="$HOME/.spotiflac/extensions/$ext"
+            test -f "$dir/manifest.json" || { echo "Missing $dir/manifest.json"; exit 1; }
+            echo "Verified $ext:"
+            find "$dir" -maxdepth 2 -type f -printf '  %p\n' | sort
+          done
 
       - name: Acquire and upload
         run: python workers/acquire/acquire.py
