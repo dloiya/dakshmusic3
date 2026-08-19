@@ -63,10 +63,8 @@ def _deezer_track() -> dict:
 
 
 def _resolve_spotify_from_isrc() -> str | None:
-    """Resolve ISRC -> canonical Spotify track URL without Spotify credentials."""
     if not ISRC:
         return None
-
     response = requests.get(
         f"https://isrctools.com/api/lookup/{ISRC}",
         headers={**HEADERS, "Accept": "application/json"},
@@ -74,7 +72,6 @@ def _resolve_spotify_from_isrc() -> str | None:
     )
     response.raise_for_status()
     data = response.json()
-
     if not data.get("found") or not data.get("spotifyAvailable"):
         return None
 
@@ -84,7 +81,6 @@ def _resolve_spotify_from_isrc() -> str | None:
     ]
     if not tracks:
         return None
-
     tracks.sort(
         key=lambda track: (
             int(track.get("popularity") or 0),
@@ -92,34 +88,30 @@ def _resolve_spotify_from_isrc() -> str | None:
         ),
         reverse=True,
     )
-
     selected = tracks[0]
-    url = selected["url"]
-    # ISRC Tools may return Markdown links such as [url](url). Extract the
-    # actual Spotify URL before handing it to SpotiFLAC.
-    match = re.search(r"https?://open\.spotify\.com/track/[A-Za-z0-9]+", str(url))
+    match = re.search(r"https?://open\.spotify\.com/track/[A-Za-z0-9]+", str(selected["url"]))
     if not match:
         return None
     url = match.group(0)
-
     print(f"ISRC Tools: {ISRC} -> Spotify {url} (popularity={selected.get('popularity', 0)})")
     return url
 
 
-def _resolve_youtube_url() -> str | None:
+def _resolve_youtube_urls() -> list[str]:
     query = f"{ISRC} {TITLE} {ARTIST}".strip() if ISRC else f"{TITLE} {ARTIST}".strip()
     command = [
-        "yt-dlp", f"ytsearch1:{query}", "--flat-playlist", "--print", "%(webpage_url)s",
-        "--skip-download", "--no-warnings",
+        "yt-dlp", f"ytsearch5:{query}", "--flat-playlist", "--print", "%(webpage_url)s",
+        "--skip-download", "--no-warnings", "--js-runtimes", "deno", "--remote-components", "ejs:github",
     ]
     completed = subprocess.run(command, text=True, capture_output=True, timeout=90)
     if completed.returncode:
-        return None
+        return []
+    urls = []
     for line in completed.stdout.splitlines():
         line = line.strip()
-        if line.startswith(("http://", "https://")):
-            return line
-    return None
+        if line.startswith(("http://", "https://")) and line not in urls:
+            urls.append(line)
+    return urls
 
 
 def _download_spotiflac(url: str, output: Path) -> None:
@@ -138,7 +130,9 @@ def _download_spotiflac(url: str, output: Path) -> None:
             track_max_retries=2,
             timeout_s=180,
             embed_lyrics=False,
-            use_extensions_fallback=False,
+            # Extensions are the intended fallback providers. SpotiFLAC
+            # downloads/loads them from the configured registry automatically.
+            use_extensions_fallback=True,
         ) as client:
             await client.download_track(url)
 
@@ -161,18 +155,28 @@ def _run_spotiflac(output: Path):
     else:
         print(f"No Spotify mapping for {TITLE} / {ARTIST} (ISRC={ISRC})")
 
-    youtube_url = _resolve_youtube_url()
-    if not youtube_url:
+    youtube_urls = _resolve_youtube_urls()
+    if not youtube_urls:
         raise RuntimeError(f"No Spotify or YouTube mapping for {TITLE} / {ARTIST}")
-    print(f"YouTube fallback: {youtube_url}")
-    _run_ytdlp(output, youtube_url)
+
+    last_error = None
+    for youtube_url in youtube_urls:
+        print(f"YouTube fallback: {youtube_url}")
+        try:
+            _run_ytdlp(output, youtube_url)
+            return
+        except Exception as exc:
+            last_error = exc
+            print(f"YouTube candidate failed: {youtube_url} -> {exc}")
+
+    raise RuntimeError(f"All YouTube fallback candidates failed for {TITLE} / {ARTIST}: {last_error}")
 
 
 def _run_ytdlp(output: Path, target_url: str | None = None):
     target = target_url or (f"ytsearch5:{ISRC} {TITLE} {ARTIST}" if ISRC else f"ytsearch5:{TITLE} {ARTIST}")
     command = [
         "yt-dlp", target, "--no-playlist", "-x",
-        "-f", "bestaudio[ext=m4a]/bestaudio/best",
+        "-f", "ba/b",
         "--audio-format", "flac", "--audio-quality", "0",
         "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
         "--js-runtimes", "deno", "--remote-components", "ejs:github",
