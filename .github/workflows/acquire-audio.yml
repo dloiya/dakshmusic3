@@ -18,6 +18,9 @@ on:
       album:
         required: false
         type: string
+      isrc:
+        required: false
+        type: string
       source:
         required: false
         type: string
@@ -41,6 +44,7 @@ jobs:
       TITLE: ${{ inputs.title }}
       ARTIST: ${{ inputs.artist }}
       ALBUM: ${{ inputs.album }}
+      ISRC: ${{ inputs.isrc }}
       SOURCE: ${{ inputs.source }}
       SOURCE_ID: ${{ inputs.source_id }}
       SOURCE_URL: ${{ inputs.source_url }}
@@ -51,6 +55,7 @@ jobs:
       R2_ACCESS_KEY: ${{ secrets.DAKSH_R2_ACCESS_KEY_ID }}
       R2_SECRET_KEY: ${{ secrets.DAKSH_R2_SECRET_ACCESS_KEY }}
       YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
+      SPOTIFLAC_REGISTRIES: https://raw.githubusercontent.com/spotiflacapp/SpotiFLAC-Extension/main/registry.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
