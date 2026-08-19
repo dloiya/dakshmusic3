@@ -68,5 +68,79 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install yt-dlp boto3 requests spotiflac
+
+      - name: Download and install SpotiFLAC extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXT_DIR="$HOME/.spotiflac/extensions"
+          mkdir -p "$EXT_DIR"
+
+          REGISTRY_URL="$SPOTIFLAC_REGISTRIES"
+          echo "Downloading SpotiFLAC extension registry..."
+          curl --fail --location --retry 3 --retry-delay 2 --silent --show-error \
+            "$REGISTRY_URL" -o /tmp/spotiflac-registry.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          registry = json.loads(Path('/tmp/spotiflac-registry.json').read_text())
+          print(json.dumps(registry, indent=2)[:12000])
+          PY
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          registry = json.loads(Path('/tmp/spotiflac-registry.json').read_text())
+          urls = []
+
+          def walk(value):
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      if key.lower() in {'url', 'downloadurl', 'download_url', 'artifact', 'artifacturl', 'artifact_url'} and isinstance(child, str):
+                          if '.spotiflac-ext' in child or child.endswith(('.zip', '.whl')):
+                              urls.append(child)
+                      walk(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      walk(child)
+
+          walk(registry)
+          urls = list(dict.fromkeys(urls))
+          if not urls:
+              raise SystemExit('No downloadable SpotiFLAC extensions found in registry')
+          Path('/tmp/spotiflac-extension-urls.txt').write_text('\n'.join(urls) + '\n')
+          print(f'Found {len(urls)} extension artifacts')
+          PY
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            name="${url##*/}"
+            echo "Downloading extension: $name"
+            curl --fail --location --retry 3 --retry-delay 2 --silent --show-error \
+              "$url" -o "$EXT_DIR/$name"
+          done < /tmp/spotiflac-extension-urls.txt
+
+          echo "Installed SpotiFLAC extension files:"
+          find "$EXT_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+          test "$(find "$EXT_DIR" -maxdepth 1 -type f | wc -l)" -gt 0
+
+      - name: Verify SpotiFLAC extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXT_DIR="$HOME/.spotiflac/extensions"
+          echo "SpotiFLAC extension directory: $EXT_DIR"
+          find "$EXT_DIR" -maxdepth 1 -type f -ls
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path.home() / '.spotiflac' / 'extensions'
+          files = list(p.glob('*'))
+          if not files:
+              raise SystemExit('SpotiFLAC extension installation produced no files')
+          print(f'Verified {len(files)} installed extension artifacts')
+          PY
+
       - name: Acquire and upload
         run: python workers/acquire/acquire.py
