@@ -4,6 +4,7 @@ import subprocess
 
 DB = os.environ.get("D1_DATABASE", "dakshmusic3")
 RESULT_FILE = "/tmp/acquisition-result.json"
+MAX_ATTEMPTS = int(os.environ.get("MAX_ACQUISITION_ATTEMPTS", "3"))
 
 
 def run_wrangler(sql):
@@ -34,21 +35,20 @@ def sql(value):
 def set_failed(job_id, error):
     message = str(error or "unknown acquisition failure")[-4000:]
     try:
-        run_wrangler(
-            "UPDATE acquisition_jobs SET status='failed',last_error=" + sql(message) + ",updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id)
-        )
+        run_wrangler("UPDATE acquisition_jobs SET status='failed',last_error=" + sql(message) + ",updated_at=CURRENT_TIMESTAMP WHERE id=" + sql(job_id))
     except subprocess.CalledProcessError as exc:
-        print(f"Warning: unable to mark job {job_id} failed in D1: {exc}")
+        print(f"Warning: unable to mark job {job_id} failed in D1: {exc.stderr or exc}")
 
 
 rows = run_wrangler(
     "SELECT j.id AS job_id,j.track_id,t.title,t.artist,t.album_name,t.isrc,t.source,t.source_id,t.source_url "
     "FROM acquisition_jobs j JOIN tracks t ON t.id=j.track_id "
-    "WHERE j.status='queued' ORDER BY j.created_at,j.id LIMIT 1"
+    "WHERE j.status IN ('queued','failed') AND COALESCE(j.attempts,0)<" + str(MAX_ATTEMPTS) + " "
+    "ORDER BY CASE j.status WHEN 'queued' THEN 0 ELSE 1 END,j.created_at,j.id LIMIT 1"
 )
 
 if not rows:
-    print("No queued acquisition jobs. Nothing to do.")
+    print(f"No queued or retryable failed acquisition jobs (max attempts={MAX_ATTEMPTS}). Nothing to do.")
     raise SystemExit(0)
 
 job = rows[0]
@@ -60,8 +60,8 @@ job_id = str(job["job_id"])
 track_id = str(job["track_id"])
 
 claimed = run_wrangler(
-    "UPDATE acquisition_jobs SET status='running',attempts=attempts+1,updated_at=CURRENT_TIMESTAMP "
-    "WHERE id=" + sql(job_id) + " AND status='queued' RETURNING id"
+    "UPDATE acquisition_jobs SET status='running',attempts=COALESCE(attempts,0)+1,updated_at=CURRENT_TIMESTAMP "
+    "WHERE id=" + sql(job_id) + " AND status IN ('queued','failed') RETURNING id"
 )
 if not claimed:
     print(f"Job {job_id} was already claimed; exiting.")
@@ -83,7 +83,7 @@ env.update({
     "RESULT_FILE": RESULT_FILE,
 })
 
-print(f"Acquiring {job_id}: {job.get('title')} / {job.get('artist')} (ISRC={job.get('isrc') or 'none'})")
+print(f"Acquiring {job_id}: {job.get('title')} / {job.get('artist')} (ISRC={job.get('isrc') or 'none'}, max attempts={MAX_ATTEMPTS})")
 try:
     result = subprocess.run(["python", "workers/acquire/acquire.py"], env=env)
 except Exception as exc:
