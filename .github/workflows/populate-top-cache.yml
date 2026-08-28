@@ -33,14 +33,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install acquisition dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install 'spotiflac>=1.4.9' yt-dlp boto3 requests
-          python -c "import SpotiFLAC; print('SpotiFLAC:', getattr(SpotiFLAC, '__version__', 'installed'))"
-      - name: Acquire next queued track
+          pip install -U yt-dlp boto3 requests
+          npm install -g @mdlx/cli
+          echo "Node: $(node --version)"
+          echo "npm: $(npm --version)"
+          command -v mdl
+          mdl --version || true
+          yt-dlp --version
+      - name: Acquire next queued or retryable failed track
         run: python .github/scripts/run_next_acquisition.py
