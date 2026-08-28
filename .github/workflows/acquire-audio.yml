@@ -38,6 +38,7 @@ jobs:
   acquire:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     env:
       TRACK_ID: ${{ inputs.track_id }}
       JOB_ID: ${{ inputs.job_id }}
@@ -48,35 +49,56 @@ jobs:
       SOURCE: ${{ inputs.source }}
       SOURCE_ID: ${{ inputs.source_id }}
       SOURCE_URL: ${{ inputs.source_url }}
+
       CALLBACK_URL: ${{ secrets.DAKSH_WORKER_URL }}/api/v1/worker/callback
       CALLBACK_SECRET: ${{ secrets.DAKSH_WORKER_CALLBACK_SECRET }}
+
       R2_ENDPOINT: ${{ secrets.DAKSH_R2_ENDPOINT }}
       R2_BUCKET: dakshmusic3-audio
       R2_ACCESS_KEY: ${{ secrets.DAKSH_R2_ACCESS_KEY_ID }}
       R2_SECRET_KEY: ${{ secrets.DAKSH_R2_SECRET_ACCESS_KEY }}
+
       YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "24"
 
-      - uses: denoland/setup-deno@v2
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: "v2.x"
 
-      - name: Install acquisition dependencies
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade yt-dlp boto3 requests
-          npm install --global @mdlx/cli
-          mdl --help
+
+      - name: Verify acquisition environment
+        run: |
+          python --version
+          node --version
+          npm --version
+          deno --version
+          ffmpeg -version
+          yt-dlp --version
+          npx --yes @mdlx/cli --help
 
       - name: Acquire and upload
-        run: python workers/acquire/acquire.py
+        run: |
+          python workers/acquire/acquire.py
