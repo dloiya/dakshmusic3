@@ -25,7 +25,12 @@ def run_mdl(output):
  u=mdl_url()
  if not u:raise RuntimeError("No supported MusicDL URL")
  d=output.parent/"mdl-output";d.mkdir(exist_ok=True)
- r=subprocess.run(["npx","--yes","@mdlx/cli",u,"--format","flac","--output",str(d)],cwd=str(d),text=True,capture_output=True,timeout=720)
+ # Explicitly skip YouTube Proof-of-Origin token requests. This avoids shared
+ # token limits on ephemeral GitHub runners; MusicDL can still download tracks
+ # that do not require a token.
+ cmd=["npx","--yes","@mdlx/cli",u,"--no-po-token","--format","flac","--output",str(d)]
+ print("Running MusicDL via npx with --no-po-token:"," ".join(cmd[:6]),"...")
+ r=subprocess.run(cmd,cwd=str(d),text=True,capture_output=True,timeout=720)
  log=(r.stdout+r.stderr);print("MusicDL output tail:",log[-2500:])
  if r.returncode or re.search(r"\bError:\s*\{",log,re.I):raise RuntimeError((log[-4000:] or "MusicDL failed").replace("\n"," "))
  s=find_flac(d) or find_flac(output.parent)
