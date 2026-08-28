@@ -34,9 +34,6 @@ on:
 permissions:
   contents: read
 
-env:
-  SPOTIFLAC_REGISTRIES: https://raw.githubusercontent.com/spotiflacapp/SpotiFLAC-Extension/main/registry.json
-
 jobs:
   acquire:
     runs-on: ubuntu-latest
@@ -77,71 +74,9 @@ jobs:
       - name: Install acquisition dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade yt-dlp boto3 requests spotiflac
-
-      - name: Configure SpotiFLAC registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'SPOTIFLAC_REGISTRIES=%s\n' "$SPOTIFLAC_REGISTRIES" > "$HOME/.spotiflac_env"
-          echo "SPOTIFLAC_REGISTRIES=$SPOTIFLAC_REGISTRIES" >> "$GITHUB_ENV"
-          curl --fail --location --retry 3 --retry-delay 2 --silent --show-error \
-            "$SPOTIFLAC_REGISTRIES" -o /tmp/spotiflac-registry.json
-
-      - name: Install SpotiFLAC download extensions
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          from SpotiFLAC.extensions.manager import ExtensionManager
-
-          registry = os.environ["SPOTIFLAC_REGISTRIES"]
-          manager = ExtensionManager(auto_install_downloads=False)
-          print(f"Installing SpotiFLAC extensions from: {registry}")
-
-          entries = manager.fetch_registry(registry)
-          targets = {
-              e.id: e for e in entries
-              if e.id in {"tidal-web", "qobuz-web", "amazon"}
-          }
-          print("Registry targets:", sorted(targets))
-
-          missing = {"tidal-web", "qobuz-web", "amazon"} - set(targets)
-          if missing:
-              raise RuntimeError(f"Required extensions missing from registry: {sorted(missing)}")
-
-          for name in ("tidal-web", "qobuz-web", "amazon"):
-              entry = targets[name]
-              installed = manager.get_installed(name)
-              if installed and installed.version == entry.version:
-                  print(f"Already installed: {name} v{installed.version}")
-                  continue
-              print(f"Downloading/installing: {name} v{entry.version}")
-              manager.install_from_url(entry.download_url, sha256=entry.sha256)
-
-          installed = manager.get_installed()
-          print("Installed extensions:")
-          for ext in installed:
-              print(f"  - {ext.name} v{ext.version} [{ext.ext_dir}]")
-
-          installed_names = {ext.name for ext in installed}
-          required = {"tidal-web", "qobuz-web", "amazon"}
-          missing = required - installed_names
-          if missing:
-              raise RuntimeError(f"Extension installation verification failed: {sorted(missing)}")
-          PY
-
-      - name: Verify SpotiFLAC extension files
-        shell: bash
-        run: |
-          set -euo pipefail
-          for ext in tidal-web qobuz-web amazon; do
-            dir="$HOME/.spotiflac/extensions/$ext"
-            test -f "$dir/manifest.json" || { echo "Missing $dir/manifest.json"; exit 1; }
-            echo "Verified $ext:"
-            find "$dir" -maxdepth 2 -type f -printf '  %p\n' | sort
-          done
+          pip install --upgrade yt-dlp boto3 requests
+          npm install --global @mdlx/cli
+          mdl --help
 
       - name: Acquire and upload
         run: python workers/acquire/acquire.py
