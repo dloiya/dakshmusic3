@@ -17,7 +17,8 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
-      max-parallel: 10
+      # Keep MusicDL concurrency low to reduce simultaneous token/session pressure.
+      max-parallel: 2
       matrix:
         slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
@@ -43,13 +44,10 @@ jobs:
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           pip install -U yt-dlp boto3 requests
-          npm install -g @mdlx/cli
           echo "Node: $(node --version)"
           echo "npm: $(npm --version)"
           command -v ffmpeg
           ffmpeg -version
-          command -v mdl
-          mdl --version || true
           yt-dlp --version
       - name: Acquire next queued or retryable failed track
         run: python .github/scripts/run_next_acquisition.py
