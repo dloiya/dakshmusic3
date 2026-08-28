@@ -39,11 +39,15 @@ jobs:
           python-version: '3.12'
       - name: Install acquisition dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           pip install -U yt-dlp boto3 requests
           npm install -g @mdlx/cli
           echo "Node: $(node --version)"
           echo "npm: $(npm --version)"
+          command -v ffmpeg
+          ffmpeg -version
           command -v mdl
           mdl --version || true
           yt-dlp --version
