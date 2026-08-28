@@ -1,22 +1,5 @@
-import express from 'express';
-import cors from 'cors';
-import {spawn, spawnSync} from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-
-const app=express(); app.use(cors()); app.use(express.json());
-const PORT=process.env.PORT||9876;
-let state={running:false,current:null,completed:0,failed:0,lastError:null,process:null};
-const bin=x=>spawnSync(x,['--version'],{shell:true,encoding:'utf8'}).status===0;
-app.get('/api/status',(req,res)=>res.json({...state,process:undefined,capabilities:{node:process.version,ffmpeg:bin('ffmpeg'),mdl:bin('npx'),ytdlp:bin('yt-dlp')}}));
-app.post('/api/acquire',(req,res)=>{
- const {url,output='downloads'}=req.body||{}; if(!url)return res.status(400).json({error:'url is required'}); if(state.process)return res.status(409).json({error:'node is busy'});
- fs.mkdirSync(output,{recursive:true}); state.running=true; state.current=url; state.lastError=null;
- const args=['--yes','@mdlx/cli',url,'--output',path.resolve(output),'--parallel','1','--format','flac','--bitrate','best','--no-po-token'];
- const child=spawn('npx',args,{shell:false}); state.process=child;
- child.stdout.on('data',d=>process.stdout.write('[mdl] '+d)); child.stderr.on('data',d=>process.stderr.write('[mdl] '+d));
- child.on('close',code=>{state.running=false;state.process=null;state.current=null;if(code===0)state.completed++;else{state.failed++;state.lastError=`MusicDL exited ${code}`;}});
- res.status(202).json({accepted:true,url});
-});
-app.post('/api/stop',(req,res)=>{if(state.process){state.process.kill('SIGTERM');return res.json({stopped:true})}res.json({stopped:false})});
-app.listen(PORT,()=>console.log(`DakshMusic local node: http://127.0.0.1:${PORT}`));
+import express from 'express';import cors from 'cors';import {spawn,spawnSync} from 'node:child_process';import fs from 'node:fs';import path from 'node:path';
+const app=express();app.use(cors());app.use(express.json());const PORT=process.env.PORT||9876,COORD=process.env.COORDINATOR_URL||'';let state={running:false,current:null,completed:0,failed:0,lastError:null,process:null,workerId:crypto.randomUUID(),polling:false};const bin=x=>spawnSync(x,['--version'],{shell:true,encoding:'utf8'}).status===0;
+async function acquire(url,output='downloads'){if(state.process)throw Error('node busy');fs.mkdirSync(output,{recursive:true});state.running=true;state.current=url;state.lastError=null;return await new Promise((resolve,reject)=>{const c=spawn('npx',['--yes','@mdlx/cli',url,'--output',path.resolve(output),'--parallel','1','--format','flac','--bitrate','best','--no-po-token'],{shell:false});state.process=c;c.on('close',code=>{state.running=false;state.process=null;state.current=null;if(code===0){state.completed++;resolve()}else{state.failed++;state.lastError=`MusicDL exited ${code}`;reject(Error(state.lastError))}})})}
+async function poll(){if(!COORD||state.running)return;try{const r=await fetch(COORD+'/jobs/claim',{method:'POST'}),{job}=await r.json();if(!job)return;try{await acquire(job.url);await fetch(`${COORD}/jobs/${job.id}/complete`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({storage_key:null})})}catch(e){await fetch(`${COORD}/jobs/${job.id}/fail`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({error:e.message})})}}catch(e){state.lastError='Coordinator: '+e.message}}
+app.get('/api/status',(q,s)=>s.json({...state,process:undefined,coordinator:COORD,capabilities:{node:process.version,ffmpeg:bin('ffmpeg'),npx:bin('npx'),ytdlp:bin('yt-dlp')}}));app.post('/api/acquire',async(q,s)=>{try{acquire(q.body?.url,q.body?.output).catch(()=>{});s.status(202).json({accepted:true})}catch(e){s.status(409).json({error:e.message})}});app.post('/api/stop',(q,s)=>{if(state.process){state.process.kill();return s.json({stopped:true})}s.json({stopped:false})});app.listen(PORT,()=>{console.log(`DakshMusic node http://127.0.0.1:${PORT}`);setInterval(poll,5000);poll()});
