@@ -5,7 +5,7 @@ from urllib.parse import quote
 import requests
 JOB_ID=os.environ["JOB_ID"];TRACK_ID=os.environ["TRACK_ID"];TITLE=os.environ.get("TITLE","");ARTIST=os.environ.get("ARTIST","");SOURCE=os.environ.get("SOURCE","");SOURCE_ID=os.environ.get("SOURCE_ID","");SOURCE_URL=os.environ.get("SOURCE_URL","");ISRC=os.environ.get("ISRC","")
 R2_ENDPOINT=os.environ["R2_ENDPOINT"];R2_BUCKET=os.environ.get("R2_BUCKET","dakshmusic3-audio");R2_ACCESS_KEY=os.environ["R2_ACCESS_KEY"];R2_SECRET=os.environ["R2_SECRET_KEY"];RESULT_FILE=Path(os.environ.get("RESULT_FILE","/tmp/acquisition-result.json"))
-MDL_HOSTS=("open.spotify.com","music.apple.com","music.amazon.","music.youtube.com","youtube.com","youtu.be","soundcloud.com","bandcamp.com","deezer.com","qobuz.com","tidal.com")
+MDL_HOSTS=("open.spotify.com","music.apple.com","music.amazon.","music.youtube.com","youtube.com","youtu.be","soundcloud.com","bandcamp.com","qobuz.com","deezer.com","tidal.com")
 def write_result(status,**extra):RESULT_FILE.write_text(json.dumps({"job_id":JOB_ID,"track_id":TRACK_ID,"status":status,**extra}),encoding="utf-8")
 def spotify_from_isrc():
  if not ISRC:return None
@@ -25,11 +25,10 @@ def run_mdl(output):
  u=mdl_url()
  if not u:raise RuntimeError("No supported MusicDL URL")
  d=output.parent/"mdl-output";d.mkdir(exist_ok=True)
- # Explicitly skip YouTube Proof-of-Origin token requests. This avoids shared
- # token limits on ephemeral GitHub runners; MusicDL can still download tracks
- # that do not require a token.
- cmd=["npx","--yes","@mdlx/cli",u,"--no-po-token","--format","flac","--output",str(d)]
- print("Running MusicDL via npx with --no-po-token:"," ".join(cmd[:6]),"...")
+ # One acquisition job represents one queue item. MusicDL may receive a track,
+ # album, or playlist URL; parallel=1 keeps each runner to one active download.
+ cmd=["npx","--yes","@mdlx/cli",u,"--output",str(d),"--parallel","1","--format","flac","--bitrate","best","--no-po-token"]
+ print("Running MusicDL:"," ".join(cmd[:6]),"...")
  r=subprocess.run(cmd,cwd=str(d),text=True,capture_output=True,timeout=720)
  log=(r.stdout+r.stderr);print("MusicDL output tail:",log[-2500:])
  if r.returncode or re.search(r"\bError:\s*\{",log,re.I):raise RuntimeError((log[-4000:] or "MusicDL failed").replace("\n"," "))
