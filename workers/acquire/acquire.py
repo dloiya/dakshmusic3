@@ -25,20 +25,32 @@ def run_mdl(output):
  u=mdl_url()
  if not u:raise RuntimeError("No supported MusicDL URL")
  d=output.parent/"mdl-output";d.mkdir(exist_ok=True)
- # One acquisition job represents one queue item. MusicDL may receive a track,
- # album, or playlist URL; parallel=1 keeps each runner to one active download.
  cmd=["npx","--yes","@mdlx/cli",u,"--output",str(d),"--parallel","1","--format","flac","--bitrate","best","--no-po-token"]
+ cookie_b64=os.environ.get("YTDLP_COOKIES_B64")
+ cookie_path=None
+ # MusicDL exposes --yt-cookie, so pass the same authenticated YouTube cookie
+ # used by the fallback when available. Write it only to the ephemeral runner.
+ if cookie_b64:
+  fd,name=tempfile.mkstemp(suffix=".txt");os.close(fd);cookie_path=Path(name);cookie_path.write_bytes(base64.b64decode(cookie_b64));cmd += ["--yt-cookie",str(cookie_path)]
  print("Running MusicDL:"," ".join(cmd[:6]),"...")
- r=subprocess.run(cmd,cwd=str(d),text=True,capture_output=True,timeout=720)
- log=(r.stdout+r.stderr);print("MusicDL output tail:",log[-2500:])
- if r.returncode or re.search(r"\bError:\s*\{",log,re.I):raise RuntimeError((log[-4000:] or "MusicDL failed").replace("\n"," "))
- s=find_flac(d) or find_flac(output.parent)
- if not s:raise RuntimeError("MusicDL finished without a FLAC")
- if s.resolve()!=output.resolve():shutil.copy2(s,output)
+ try:
+  r=subprocess.run(cmd,cwd=str(d),text=True,capture_output=True,timeout=720)
+  log=(r.stdout+r.stderr);print("MusicDL output tail:",log[-2500:])
+  if r.returncode or re.search(r"\bError:\s*\{",log,re.I):raise RuntimeError((log[-4000:] or "MusicDL failed").replace("\n"," "))
+  s=find_flac(d) or find_flac(output.parent)
+  if not s:raise RuntimeError("MusicDL finished without a FLAC")
+  if s.resolve()!=output.resolve():shutil.copy2(s,output)
+ finally:
+  if cookie_path:cookie_path.unlink(missing_ok=True)
 def ytdlp_candidates():
- q=f'ytsearch10:"{ISRC}" {TITLE} {ARTIST}' if ISRC else f'ytsearch10:"{TITLE}" {ARTIST}'
- r=subprocess.run(["yt-dlp","--flat-playlist","--print","%(id)s",q,"--no-warnings"],text=True,capture_output=True,timeout=120)
- return list(dict.fromkeys(x.strip() for x in r.stdout.splitlines() if x.strip()))
+ queries=[]
+ if ISRC:queries.append(f'ytsearch10:"{ISRC}"')
+ queries.append(f'ytsearch10:"{TITLE}" {ARTIST}')
+ ids=[]
+ for q in queries:
+  r=subprocess.run(["yt-dlp","--flat-playlist","--print","%(id)s",q,"--no-warnings"],text=True,capture_output=True,timeout=120)
+  ids.extend(x.strip() for x in r.stdout.splitlines() if x.strip())
+ return list(dict.fromkeys(ids))
 def run_ytdlp(output):
  ids=ytdlp_candidates();print("yt-dlp candidate count:",len(ids))
  if not ids:raise RuntimeError("yt-dlp search returned no candidates")
@@ -48,7 +60,7 @@ def run_ytdlp(output):
  errors=[]
  try:
   for vid in ids:
-   url=f"https://www.youtube.com/watch?v={vid}";cmd=["yt-dlp",url,"--no-playlist","-x","--audio-format","flac","--audio-quality","0","--js-runtimes","deno","--remote-components","ejs:github","-o",str(output.with_suffix(".%(ext)s")),"--no-warnings"]
+   cmd=["yt-dlp",f"https://www.youtube.com/watch?v={vid}","--no-playlist","-x","--audio-format","flac","--audio-quality","0","--js-runtimes","deno","--remote-components","ejs:github","-o",str(output.with_suffix(".%(ext)s")),"--no-warnings","--retries","3","--extractor-retries","3"]
    if cookie:cmd += ["--cookies",str(cookie)]
    print("Trying yt-dlp candidate:",vid)
    r=subprocess.run(cmd,text=True,capture_output=True,timeout=720)
