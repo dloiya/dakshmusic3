@@ -1,15 +1,1 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DakshMusic Node</title>
-  <script type="module" src="/src/main.js"></script>
-</head>
-<body>
-  <main>
-    <h1>DakshMusic Node</h1>
-    <p>Fresh web-controlled worker.</p>
-  </main>
-</body>
-</html>
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DakshMusic Node</title><style>body{font-family:system-ui;max-width:720px;margin:40px auto;padding:20px}input,button{font:inherit;padding:10px;margin:4px}input{width:90%}pre{background:#111;color:#0f0;padding:16px;min-height:120px;overflow:auto}</style></head><body><h1>🎵 DakshMusic Node</h1><p id="status">Connecting to local node…</p><input id="url" placeholder="Spotify, Deezer, album, playlist or track URL"><br><button onclick="acquire()">Acquire</button><button onclick="stop()">Stop</button><pre id="log"></pre><script>const API='http://127.0.0.1:9876/api',out=document.querySelector('#log');async function refresh(){try{let s=await fetch(API+'/status').then(r=>r.json());status.textContent=s.running?'🟡 Working: '+s.current:'🟢 Local node online';out.textContent=JSON.stringify(s,null,2)}catch(e){status.textContent='🔴 Local node offline — start npm start in /node';out.textContent=e.message}}async function acquire(){let url=document.querySelector('#url').value.trim();if(!url)return;let r=await fetch(API+'/acquire',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url})});out.textContent=JSON.stringify(await r.json(),null,2);refresh()}async function stop(){await fetch(API+'/stop',{method:'POST'});refresh()}setInterval(refresh,1500);refresh();</script></body></html>
