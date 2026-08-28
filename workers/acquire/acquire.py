@@ -29,17 +29,9 @@ RESULT_FILE = Path(os.environ.get("RESULT_FILE", "/tmp/acquisition-result.json")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (dakshmusic3-acquisition)"}
 MDL_SUPPORTED_HOSTS = (
-    "open.spotify.com",
-    "music.apple.com",
-    "music.amazon.",
-    "music.youtube.com",
-    "youtube.com",
-    "youtu.be",
-    "soundcloud.com",
-    "bandcamp.com",
-    "deezer.com",
-    "qobuz.com",
-    "tidal.com",
+    "open.spotify.com", "music.apple.com", "music.amazon.", "music.youtube.com",
+    "youtube.com", "youtu.be", "soundcloud.com", "bandcamp.com", "deezer.com",
+    "qobuz.com", "tidal.com",
 )
 
 
@@ -50,35 +42,20 @@ def write_result(status: str, **extra):
 def _resolve_spotify_from_isrc() -> str | None:
     if not ISRC:
         return None
-    response = requests.get(
-        f"https://isrctools.com/api/lookup/{ISRC}",
-        headers={**HEADERS, "Accept": "application/json"},
-        timeout=30,
-    )
+    response = requests.get(f"https://isrctools.com/api/lookup/{ISRC}", headers={**HEADERS, "Accept": "application/json"}, timeout=30)
     response.raise_for_status()
     data = response.json()
     if not data.get("found") or not data.get("spotifyAvailable"):
         return None
-
-    tracks = [
-        track for track in (data.get("tracks") or [])
-        if track.get("url") and "open.spotify.com/track/" in track["url"]
-    ]
+    tracks = [track for track in (data.get("tracks") or []) if track.get("url") and "open.spotify.com/track/" in track["url"]]
     if not tracks:
         return None
-    tracks.sort(
-        key=lambda track: (
-            int(track.get("popularity") or 0),
-            int(track.get("durationMs") or 0),
-        ),
-        reverse=True,
-    )
-    selected = tracks[0]
-    match = re.search(r"https?://open\.spotify\.com/track/[A-Za-z0-9]+", str(selected["url"]))
+    tracks.sort(key=lambda track: (int(track.get("popularity") or 0), int(track.get("durationMs") or 0)), reverse=True)
+    match = re.search(r"https?://open\.spotify\.com/track/[A-Za-z0-9]+", str(tracks[0]["url"]))
     if not match:
         return None
     url = match.group(0)
-    print(f"ISRC Tools: {ISRC} -> Spotify {url} (popularity={selected.get('popularity', 0)})")
+    print(f"ISRC Tools: {ISRC} -> Spotify {url}")
     return url
 
 
@@ -91,17 +68,14 @@ def _resolve_mdl_url() -> str | None:
     if _is_mdl_url(SOURCE_URL):
         print(f"MusicDL input: source URL {SOURCE_URL}")
         return SOURCE_URL
-
     if SOURCE == "deezer" and SOURCE_ID:
         url = f"https://www.deezer.com/track/{quote(SOURCE_ID, safe='')}"
         print(f"MusicDL input: constructed Deezer URL {url}")
         return url
-
     spotify_url = _resolve_spotify_from_isrc()
     if spotify_url:
         print(f"MusicDL input: Spotify {spotify_url}")
         return spotify_url
-
     return None
 
 
@@ -115,33 +89,25 @@ def _find_flac(root: Path) -> Path:
 def _run_mdl(output: Path) -> None:
     source_url = _resolve_mdl_url()
     if not source_url:
-        raise RuntimeError(
-            f"MusicDL needs a supported source URL or ISRC-to-Spotify mapping for {TITLE} / {ARTIST}"
-        )
-
+        raise RuntimeError(f"MusicDL needs a supported source URL or ISRC-to-Spotify mapping for {TITLE} / {ARTIST}")
+    mdl = os.environ.get("MDL_BIN") or shutil.which("mdl")
+    if not mdl:
+        raise RuntimeError("MusicDL executable 'mdl' was not found on PATH")
     outdir = output.parent / "_mdl"
     outdir.mkdir(parents=True, exist_ok=True)
-    command = [
-        "mdl", source_url,
-        "--output", str(outdir),
-        "--format", "flac",
-        "--parallel", "1",
-        "--no-po-token",
-    ]
+    command = [mdl, source_url, "--output", str(outdir), "--format", "flac", "--parallel", "1"]
     print("Running MusicDL:", " ".join(command[:2]), "...")
     completed = subprocess.run(command, text=True, capture_output=True, timeout=12 * 60)
     if completed.returncode:
         detail = (completed.stderr[-4000:] or completed.stdout[-4000:] or "MusicDL failed").replace("\n", " ")
         raise RuntimeError(detail)
-
     shutil.copy2(_find_flac(outdir), output)
 
 
 def _run_ytdlp(output: Path, target_url: str | None = None):
     target = target_url or (f"ytsearch5:{ISRC} {TITLE} {ARTIST}" if ISRC else f"ytsearch5:{TITLE} {ARTIST}")
     command = [
-        "yt-dlp", target, "--no-playlist", "-x",
-        "-f", "ba/b",
+        "yt-dlp", target, "--no-playlist", "-x", "-f", "bestaudio/best",
         "--audio-format", "flac", "--audio-quality", "0",
         "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
         "--js-runtimes", "deno", "--remote-components", "ejs:github",
