@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -27,39 +28,23 @@ R2_SECRET = os.environ["R2_SECRET_KEY"]
 RESULT_FILE = Path(os.environ.get("RESULT_FILE", "/tmp/acquisition-result.json"))
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (dakshmusic3-acquisition)"}
+MDL_SUPPORTED_HOSTS = (
+    "open.spotify.com",
+    "music.apple.com",
+    "music.amazon.",
+    "music.youtube.com",
+    "youtube.com",
+    "youtu.be",
+    "soundcloud.com",
+    "bandcamp.com",
+    "deezer.com",
+    "qobuz.com",
+    "tidal.com",
+)
 
 
 def write_result(status: str, **extra):
     RESULT_FILE.write_text(json.dumps({"job_id": JOB_ID, "track_id": TRACK_ID, "status": status, **extra}), encoding="utf-8")
-
-
-def _deezer_track() -> dict:
-    if SOURCE == "deezer" and SOURCE_ID:
-        response = requests.get(f"https://api.deezer.com/track/{SOURCE_ID}", headers=HEADERS, timeout=20)
-        response.raise_for_status()
-        track = response.json()
-        if track.get("id"):
-            return track
-    if ISRC:
-        response = requests.get(f"https://api.deezer.com/track/isrc:{ISRC}", headers=HEADERS, timeout=20)
-        if response.ok:
-            track = response.json()
-            if track.get("id"):
-                return track
-    query = f"{TITLE} {ARTIST}".strip()
-    response = requests.get("https://api.deezer.com/search/track", params={"q": query, "limit": 10}, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    tracks = response.json().get("data") or []
-    if not tracks:
-        raise RuntimeError(f"Deezer metadata lookup returned no tracks for {TITLE} / {ARTIST}")
-    title_norm, artist_norm = TITLE.casefold().strip(), ARTIST.casefold().strip()
-
-    def score(track):
-        t = str(track.get("title", "")).casefold().strip()
-        a = str((track.get("artist") or {}).get("name", "")).casefold().strip()
-        return (2 if t == title_norm else 0) + (2 if a == artist_norm else 0)
-
-    return max(tracks, key=score)
 
 
 def _resolve_spotify_from_isrc() -> str | None:
@@ -97,79 +82,59 @@ def _resolve_spotify_from_isrc() -> str | None:
     return url
 
 
-def _resolve_youtube_urls() -> list[str]:
-    query = f"{ISRC} {TITLE} {ARTIST}".strip() if ISRC else f"{TITLE} {ARTIST}".strip()
-    command = [
-        "yt-dlp", f"ytsearch5:{query}", "--flat-playlist", "--print", "%(webpage_url)s",
-        "--skip-download", "--no-warnings", "--js-runtimes", "deno", "--remote-components", "ejs:github",
-    ]
-    completed = subprocess.run(command, text=True, capture_output=True, timeout=90)
-    if completed.returncode:
-        return []
-    urls = []
-    for line in completed.stdout.splitlines():
-        line = line.strip()
-        if line.startswith(("http://", "https://")) and line not in urls:
-            urls.append(line)
-    return urls
+def _is_mdl_url(url: str) -> bool:
+    value = url.casefold()
+    return value.startswith(("http://", "https://")) and any(host in value for host in MDL_SUPPORTED_HOSTS)
 
 
-def _download_spotiflac(url: str, output: Path) -> None:
-    import asyncio
-    import glob
-    from SpotiFLAC.client import AsyncSpotiFLAC
+def _resolve_mdl_url() -> str | None:
+    if _is_mdl_url(SOURCE_URL):
+        print(f"MusicDL input: source URL {SOURCE_URL}")
+        return SOURCE_URL
 
-    outdir = output.parent / "_spotiflac"
-    outdir.mkdir(parents=True, exist_ok=True)
+    if SOURCE == "deezer" and SOURCE_ID:
+        url = f"https://www.deezer.com/track/{quote(SOURCE_ID, safe='')}"
+        print(f"MusicDL input: constructed Deezer URL {url}")
+        return url
 
-    async def download():
-        async with AsyncSpotiFLAC(
-            output_dir=str(outdir),
-            services=["tidal", "qobuz", "amazon"],
-            quality="LOSSLESS",
-            track_max_retries=2,
-            timeout_s=180,
-            embed_lyrics=False,
-            # Extensions are the intended fallback providers. SpotiFLAC
-            # downloads/loads them from the configured registry automatically.
-            use_extensions_fallback=True,
-        ) as client:
-            await client.download_track(url)
-
-    asyncio.run(download())
-    files = [Path(p) for p in glob.glob(str(outdir / "**" / "*.flac"), recursive=True)]
-    if not files:
-        raise RuntimeError(f"SpotiFLAC produced no FLAC for {TITLE} / {ARTIST}")
-    shutil.copy2(max(files, key=lambda p: p.stat().st_mtime), output)
-
-
-def _run_spotiflac(output: Path):
     spotify_url = _resolve_spotify_from_isrc()
     if spotify_url:
-        print(f"SpotiFLAC input: Spotify {spotify_url}")
-        try:
-            _download_spotiflac(spotify_url, output)
-            return
-        except Exception as exc:
-            print(f"Spotify acquisition failed for {TITLE} / {ARTIST}: {exc}")
-    else:
-        print(f"No Spotify mapping for {TITLE} / {ARTIST} (ISRC={ISRC})")
+        print(f"MusicDL input: Spotify {spotify_url}")
+        return spotify_url
 
-    youtube_urls = _resolve_youtube_urls()
-    if not youtube_urls:
-        raise RuntimeError(f"No Spotify or YouTube mapping for {TITLE} / {ARTIST}")
+    return None
 
-    last_error = None
-    for youtube_url in youtube_urls:
-        print(f"YouTube fallback: {youtube_url}")
-        try:
-            _run_ytdlp(output, youtube_url)
-            return
-        except Exception as exc:
-            last_error = exc
-            print(f"YouTube candidate failed: {youtube_url} -> {exc}")
 
-    raise RuntimeError(f"All YouTube fallback candidates failed for {TITLE} / {ARTIST}: {last_error}")
+def _find_flac(root: Path) -> Path:
+    files = [p for p in root.rglob("*.flac") if p.is_file() and p.stat().st_size >= 1024]
+    if not files:
+        raise RuntimeError(f"MusicDL produced no usable FLAC for {TITLE} / {ARTIST}")
+    return max(files, key=lambda p: p.stat().st_mtime)
+
+
+def _run_mdl(output: Path) -> None:
+    source_url = _resolve_mdl_url()
+    if not source_url:
+        raise RuntimeError(
+            f"MusicDL needs a supported source URL or ISRC-to-Spotify mapping for {TITLE} / {ARTIST}"
+        )
+
+    outdir = output.parent / "_mdl"
+    outdir.mkdir(parents=True, exist_ok=True)
+    command = [
+        "mdl", source_url,
+        "--output", str(outdir),
+        "--format", "flac",
+        "--parallel", "1",
+        "--no-po-token",
+    ]
+    print("Running MusicDL:", " ".join(command[:2]), "...")
+    completed = subprocess.run(command, text=True, capture_output=True, timeout=12 * 60)
+    if completed.returncode:
+        detail = (completed.stderr[-4000:] or completed.stdout[-4000:] or "MusicDL failed").replace("\n", " ")
+        raise RuntimeError(detail)
+
+    shutil.copy2(_find_flac(outdir), output)
 
 
 def _run_ytdlp(output: Path, target_url: str | None = None):
@@ -205,6 +170,19 @@ def _run_ytdlp(output: Path, target_url: str | None = None):
         raise RuntimeError(f"yt-dlp produced no FLAC for {TITLE} / {ARTIST}")
 
 
+def _acquire_audio(output: Path) -> str:
+    try:
+        _run_mdl(output)
+        print(f"Acquisition succeeded with MusicDL for {TITLE} / {ARTIST}")
+        return "mdl"
+    except Exception as mdl_error:
+        print(f"MusicDL failed for {TITLE} / {ARTIST}: {mdl_error}")
+        print("Falling back to yt-dlp search")
+        _run_ytdlp(output)
+        print(f"Acquisition succeeded with yt-dlp fallback for {TITLE} / {ARTIST}")
+        return "yt-dlp"
+
+
 def duration_ms(path: Path) -> int | None:
     try:
         result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True, capture_output=True, check=True, timeout=30)
@@ -217,10 +195,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         output = Path(tmp) / "audio.flac"
         try:
-            if SOURCE in {"deezer", "spotiflac"} or "music.apple.com" in SOURCE_URL:
-                _run_spotiflac(output)
-            else:
-                _run_ytdlp(output)
+            provider = _acquire_audio(output)
             if output.stat().st_size < 1024:
                 raise RuntimeError("acquired FLAC is unexpectedly small")
             import boto3
@@ -229,7 +204,7 @@ def main():
             size_bytes = output.stat().st_size
             duration = duration_ms(output)
             client.upload_file(str(output), R2_BUCKET, key, ExtraArgs={"ContentType": "audio/flac"})
-            write_result("complete", storage_key=key, duration_ms=duration, size_bytes=size_bytes)
+            write_result("complete", storage_key=key, duration_ms=duration, size_bytes=size_bytes, provider=provider)
         except Exception as exc:
             write_result("failed", error=str(exc).replace("\n", " ")[-4000:])
             raise
