@@ -10,12 +10,18 @@ function b64(bytes) {
 }
 
 function pemToDer(pem) {
-  const body = pem
+  // OCI documents that API private keys are PEM and may optionally have
+  // a trailing OCI_API_KEY label. Strip the PEM envelope and that label
+  // before decoding the actual PKCS#8 base64 payload.
+  const body = String(pem)
+    .replace(/^\uFEFF/, "")
     .replace(/-----BEGIN PRIVATE KEY-----/g, "")
     .replace(/-----END PRIVATE KEY-----/g, "")
     .replace(/-----BEGIN RSA PRIVATE KEY-----/g, "")
     .replace(/-----END RSA PRIVATE KEY-----/g, "")
+    .replace(/\r?\nOCI_API_KEY\s*$/i, "")
     .replace(/\s+/g, "");
+
   const bin = atob(body);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -33,34 +39,55 @@ async function importPrivateKey(pem) {
 }
 
 function canonicalPath(url) {
-  return new URL(url).pathname + new URL(url).search;
+  const u = new URL(url);
+  return u.pathname + u.search;
 }
 
 async function signRequest({ method, url, body, tenancy, user, fingerprint, privateKeyPem }) {
   const u = new URL(url);
+  const normalizedMethod = method.toLowerCase();
+  const target = `${normalizedMethod} ${canonicalPath(url)}`;
   const date = new Date().toUTCString();
-  const bodyBytes = encoder.encode(body || "");
-  const digest = await crypto.subtle.digest("SHA-256", bodyBytes);
-  const contentSha256 = b64(new Uint8Array(digest));
-  const contentLength = String(bodyBytes.byteLength);
-  const target = `${method.toLowerCase()} ${canonicalPath(url)}`;
 
+  // OCI only requires date, (request-target), and host for GET/DELETE.
+  // Do NOT sign content-* headers on GET: Workers/fetch may omit or
+  // normalize them, which makes an otherwise valid OCI signature fail.
   const headers = {
     date,
     host: u.host,
-    "content-length": contentLength,
-    "content-type": "application/json",
-    "x-content-sha256": contentSha256,
   };
 
-  const signingString = [
-    `date: ${date}`,
-    `(request-target): ${target}`,
-    `host: ${u.host}`,
-    `content-length: ${contentLength}`,
-    `content-type: application/json`,
-    `x-content-sha256: ${contentSha256}`,
-  ].join("\n");
+  let signingString;
+  let signedHeaders;
+
+  if (normalizedMethod === "get" || normalizedMethod === "delete") {
+    signedHeaders = "date (request-target) host";
+    signingString = [
+      `date: ${date}`,
+      `(request-target): ${target}`,
+      `host: ${u.host}`,
+    ].join("\n");
+  } else {
+    const bodyText = body || "";
+    const bodyBytes = encoder.encode(bodyText);
+    const digest = await crypto.subtle.digest("SHA-256", bodyBytes);
+    const contentSha256 = b64(new Uint8Array(digest));
+    const contentLength = String(bodyBytes.byteLength);
+
+    headers["content-length"] = contentLength;
+    headers["content-type"] = "application/json";
+    headers["x-content-sha256"] = contentSha256;
+
+    signedHeaders = "date (request-target) host content-length content-type x-content-sha256";
+    signingString = [
+      `date: ${date}`,
+      `(request-target): ${target}`,
+      `host: ${u.host}`,
+      `content-length: ${contentLength}`,
+      `content-type: application/json`,
+      `x-content-sha256: ${contentSha256}`,
+    ].join("\n");
+  }
 
   const key = await importPrivateKey(privateKeyPem);
   const signature = await crypto.subtle.sign(
@@ -71,9 +98,9 @@ async function signRequest({ method, url, body, tenancy, user, fingerprint, priv
 
   headers.authorization = [
     'Signature version="1"',
-    'algorithm="rsa-sha256"',
-    `headers="date (request-target) host content-length content-type x-content-sha256"`,
     `keyId="${tenancy}/${user}/${fingerprint}"`,
+    'algorithm="rsa-sha256"',
+    `headers="${signedHeaders}"`,
     `signature="${b64(new Uint8Array(signature))}"`,
   ].join(",");
 
@@ -90,11 +117,14 @@ function requireConfig(env) {
     "OCI_REGION",
   ];
   const missing = required.filter((k) => !env[k]);
-  if (missing.length) throw new Error(`Missing OCI watchdog configuration: ${missing.join(", ")}`);
+  if (missing.length) {
+    throw new Error(`Missing OCI watchdog configuration: ${missing.join(", ")}`);
+  }
 }
 
 export async function ociSignedRequest(env, method, path, body = "") {
   requireConfig(env);
+
   const base = `https://iaas.${env.OCI_REGION}.oraclecloud.com`;
   const url = `${base}${path}`;
   const headers = await signRequest({
@@ -107,19 +137,31 @@ export async function ociSignedRequest(env, method, path, body = "") {
     privateKeyPem: env.OCI_PRIVATE_KEY,
   });
 
-  const response = await fetch(url, {
+  const requestInit = {
     method,
     headers,
-    body: method === "GET" ? undefined : body,
-  });
+  };
 
+  if (method !== "GET" && method !== "DELETE") {
+    requestInit.body = body;
+  }
+
+  const response = await fetch(url, requestInit);
   const text = await response.text();
+
   let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
 
   if (!response.ok) {
-    throw new Error(`OCI API ${method} ${path} returned ${response.status}: ${text.slice(0, 500)}`);
+    throw new Error(
+      `OCI API ${method} ${path} returned ${response.status}: ${text.slice(0, 500)}`
+    );
   }
+
   return data;
 }
 
