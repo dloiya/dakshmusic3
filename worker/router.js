@@ -64,9 +64,17 @@ async function apiHealthy(env) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
-    const response = await fetch(`${ociBase(env)}/health`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${env.OCI_API_TOKEN}`, Accept: "application/json" },
+    // /start is already implemented by the OCI API. It is idempotent for the
+    // proxy stack: if the stack is running it reports started:false; otherwise
+    // it starts it. This also verifies the Bearer token.
+    const response = await fetch(`${ociBase(env)}/start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OCI_API_TOKEN}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
       signal: controller.signal,
       cache: "no-store",
     });
