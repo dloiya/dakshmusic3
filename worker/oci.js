@@ -10,9 +10,6 @@ function b64(bytes) {
 }
 
 function pemToDer(pem) {
-  // OCI documents that API private keys are PEM and may optionally have
-  // a trailing OCI_API_KEY label. Strip the PEM envelope and that label
-  // before decoding the actual PKCS#8 base64 payload.
   const body = String(pem)
     .replace(/^\uFEFF/, "")
     .replace(/-----BEGIN PRIVATE KEY-----/g, "")
@@ -49,9 +46,6 @@ async function signRequest({ method, url, body, tenancy, user, fingerprint, priv
   const target = `${normalizedMethod} ${canonicalPath(url)}`;
   const date = new Date().toUTCString();
 
-  // OCI only requires date, (request-target), and host for GET/DELETE.
-  // Do NOT sign content-* headers on GET: Workers/fetch may omit or
-  // normalize them, which makes an otherwise valid OCI signature fail.
   const headers = {
     date,
     host: u.host,
@@ -137,14 +131,8 @@ export async function ociSignedRequest(env, method, path, body = "") {
     privateKeyPem: env.OCI_PRIVATE_KEY,
   });
 
-  const requestInit = {
-    method,
-    headers,
-  };
-
-  if (method !== "GET" && method !== "DELETE") {
-    requestInit.body = body;
-  }
+  const requestInit = { method, headers };
+  if (method !== "GET" && method !== "DELETE") requestInit.body = body;
 
   const response = await fetch(url, requestInit);
   const text = await response.text();
@@ -174,10 +162,12 @@ export async function getInstance(env) {
 }
 
 export async function instanceAction(env, action) {
+  // OCI InstanceAction expects InstancePowerActionDetails. The discriminator
+  // field is actionType (not action). This is the JSON body used by OCI's SDKs.
   return ociSignedRequest(
     env,
     "POST",
     `/20160918/instances/${encodeURIComponent(env.OCI_INSTANCE_OCID)}/actions/action`,
-    JSON.stringify({ action })
+    JSON.stringify({ actionType: action })
   );
 }
