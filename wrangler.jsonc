@@ -21,6 +21,19 @@
   "vars": {
     "DEFAULT_QUEUE_KEY": "default"
   },
+  "queues": {
+    "producers": [
+      {
+        "binding": "METADATA_QUEUE",
+        "queue": "dakshmusic3-metadata"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "dakshmusic3-metadata"
+      }
+    ]
+  },
   "d1_databases": [
     {
       "binding": "DB",
