@@ -155,6 +155,14 @@ export default {
   async fetch(request, env, ctx) {
     return handle(request, env, ctx);
   },
+
+  async queue(batch, env, ctx) {
+    for (const message of batch.messages) {
+      console.log("Processing metadata message:", message.body);
+      message.ack();
+    }
+  },
+
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(
       watchdog(env, `cron:${controller.cron}`).catch((error) => {
