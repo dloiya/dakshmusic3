@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "dakshmusic3",
-  "main": "worker/index.js",
+  "main": "worker/router.js",
   "compatibility_date": "2026-08-29",
   "observability": {
     "enabled": true
