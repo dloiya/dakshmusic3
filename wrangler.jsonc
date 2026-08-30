@@ -15,6 +15,9 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
+  "triggers": {
+    "crons": ["*/2 * * * *"]
+  },
   "vars": {
     "DEFAULT_QUEUE_KEY": "default"
   },
