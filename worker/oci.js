@@ -44,10 +44,13 @@ async function signRequest({ method, url, body, tenancy, user, fingerprint, priv
   const u = new URL(url);
   const normalizedMethod = method.toLowerCase();
   const target = `${normalizedMethod} ${canonicalPath(url)}`;
-  const date = new Date().toUTCString();
+
+  // OCI accepts x-date and prefers it when present. Using x-date avoids any
+  // intermediary/runtime Date header normalization or replacement.
+  const xDate = new Date().toUTCString();
 
   const headers = {
-    date,
+    "x-date": xDate,
     host: u.host,
   };
 
@@ -55,10 +58,10 @@ async function signRequest({ method, url, body, tenancy, user, fingerprint, priv
   let signedHeaders;
 
   if (normalizedMethod === "get" || normalizedMethod === "delete") {
-    signedHeaders = "date (request-target) host";
+    signedHeaders = "(request-target) x-date host";
     signingString = [
-      `date: ${date}`,
       `(request-target): ${target}`,
+      `x-date: ${xDate}`,
       `host: ${u.host}`,
     ].join("\n");
   } else {
@@ -72,10 +75,11 @@ async function signRequest({ method, url, body, tenancy, user, fingerprint, priv
     headers["content-type"] = "application/json";
     headers["x-content-sha256"] = contentSha256;
 
-    signedHeaders = "date (request-target) host content-length content-type x-content-sha256";
+    // Match OCI's documented POST signing set exactly.
+    signedHeaders = "(request-target) x-date host content-length content-type x-content-sha256";
     signingString = [
-      `date: ${date}`,
       `(request-target): ${target}`,
+      `x-date: ${xDate}`,
       `host: ${u.host}`,
       `content-length: ${contentLength}`,
       `content-type: application/json`,
@@ -163,7 +167,7 @@ export async function getInstance(env) {
 
 export async function instanceAction(env, action) {
   // OCI InstanceAction expects InstancePowerActionDetails. The discriminator
-  // field is actionType (not action). This is the JSON body used by OCI's SDKs.
+  // field is actionType (not action).
   return ociSignedRequest(
     env,
     "POST",
