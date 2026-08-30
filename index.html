@@ -7,6 +7,31 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Deezer does not expose the search endpoint for browser CORS use.
+      // Keep the React search code unchanged, but route Deezer search requests
+      // through the same-origin Cloudflare Worker endpoint in production.
+      (() => {
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = (input, init) => {
+          try {
+            const url = new URL(
+              typeof input === "string" ? input : input.url,
+              window.location.href,
+            );
+            if (
+              url.hostname === "api.deezer.com" &&
+              url.pathname === "/search"
+            ) {
+              return nativeFetch(`/api/search${url.search}`, init);
+            }
+          } catch (_) {
+            // Fall through to the native fetch for malformed/non-URL inputs.
+          }
+          return nativeFetch(input, init);
+        };
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
