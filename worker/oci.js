@@ -166,12 +166,14 @@ export async function getInstance(env) {
 }
 
 export async function instanceAction(env, action) {
-  // OCI InstanceAction expects InstancePowerActionDetails. The discriminator
-  // field is actionType (not action).
+  // OCI's InstanceAction operation takes the action as a query parameter,
+  // not as a path segment or JSON body field:
+  //   POST /20160918/instances/{instanceId}?action=START
+  // The request body is empty for standard power actions (START/STOP/RESET).
   return ociSignedRequest(
     env,
     "POST",
-    `/20160918/instances/${encodeURIComponent(env.OCI_INSTANCE_OCID)}/actions/action`,
-    JSON.stringify({ actionType: action })
+    `/20160918/instances/${encodeURIComponent(env.OCI_INSTANCE_OCID)}?action=${encodeURIComponent(action)}`,
+    ""
   );
 }
