@@ -64,8 +64,6 @@ async function apiHealthy(env) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
-    // /start is an authenticated, idempotent proxy-stack check on OCI.
-    // Send no request body: this matches the known-good direct curl request.
     const response = await fetch(`${ociBase(env)}/start`, {
       method: "POST",
       headers: {
@@ -75,7 +73,7 @@ async function apiHealthy(env) {
       signal: controller.signal,
       cache: "no-store",
     });
-    return response.status >= 200 && response.status < 300;
+    return response.ok;
   } catch {
     return false;
   } finally {
@@ -121,10 +119,7 @@ async function handle(request, env, ctx) {
 
   if (path === "/api/start" && request.method === "POST") {
     try {
-      return await ociRequest(request, env, "/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-      });
+      return await ociRequest(request, env, "/start", { method: "POST" });
     } catch (error) {
       console.error("OCI /start error", error);
       return json({ error: error?.message || "OCI unavailable" }, 502, request);
