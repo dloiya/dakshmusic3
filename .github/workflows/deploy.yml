@@ -28,6 +28,9 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: List Queues
+        run: npx wrangler queues list
+
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
