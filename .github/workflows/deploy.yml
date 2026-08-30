@@ -27,6 +27,8 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+        env:
+          VITE_QUEUE_API_URL: ${{ vars.VITE_QUEUE_API_URL || '' }}
 
       - name: List Queues
         run: npx wrangler queues list
