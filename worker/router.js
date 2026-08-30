@@ -1,4 +1,5 @@
 import legacy from "./index.js";
+import { getInstance, instanceAction } from "./oci.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -58,6 +59,45 @@ async function deezerSearch(request) {
   return json(data, 200, request, { "cache-control": "public, max-age=60, s-maxage=300" });
 }
 
+async function apiHealthy(env) {
+  if (!env.OCI_API_URL || !env.OCI_API_TOKEN) return false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${ociBase(env)}/health`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${env.OCI_API_TOKEN}`, Accept: "application/json" },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function watchdog(env, reason = "scheduled") {
+  const healthy = await apiHealthy(env);
+  if (healthy) return { status: "healthy", action: "none", reason };
+
+  const instance = await getInstance(env);
+  const state = instance?.lifecycleState;
+
+  if (state === "STOPPED") {
+    await instanceAction(env, "START");
+    return { status: "recovering", action: "START", lifecycleState: state, reason };
+  }
+
+  if (state === "RUNNING") {
+    await instanceAction(env, "RESET");
+    return { status: "recovering", action: "RESET", lifecycleState: state, reason };
+  }
+
+  return { status: "waiting", action: "none", lifecycleState: state, reason };
+}
+
 async function handle(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -66,7 +106,6 @@ async function handle(request, env, ctx) {
     return new Response(null, { status: 204, headers: corsHeaders(request) });
   }
 
-  // Browser -> Cloudflare Worker -> Deezer.
   if (path === "/api/search" && request.method === "GET") {
     try { return await deezerSearch(request); }
     catch (error) {
@@ -75,8 +114,6 @@ async function handle(request, env, ctx) {
     }
   }
 
-  // Browser -> Cloudflare Worker -> OCI FastAPI.
-  // OCI_API_TOKEN stays inside the Worker and is never exposed to the browser.
   if (path === "/api/start" && request.method === "POST") {
     try {
       return await ociRequest(request, env, "/start", {
@@ -89,14 +126,21 @@ async function handle(request, env, ctx) {
     }
   }
 
-  // POST /api/acquire/<encoded source URL>
-  // -> POST <OCI_API_URL>/acquire/<encoded source URL>
+  if (path === "/api/watchdog" && request.method === "POST") {
+    try {
+      return json(await watchdog(env, "manual"), 200, request);
+    } catch (error) {
+      console.error("OCI watchdog error", error);
+      return json({ error: error?.message || "Watchdog failed" }, 502, request);
+    }
+  }
+
   const prefix = "/api/acquire/";
   if (path.startsWith(prefix) && request.method === "POST") {
     try {
       const encoded = path.slice(prefix.length);
       if (!encoded) return json({ error: "Missing source URL" }, 400, request);
-      decodeURIComponent(encoded); // validate URL encoding
+      decodeURIComponent(encoded);
       return await ociRequest(request, env, `/acquire/${encoded}`, { method: "POST" });
     } catch (error) {
       console.error("OCI /acquire error", error);
@@ -107,4 +151,15 @@ async function handle(request, env, ctx) {
   return legacy.fetch(request, env, ctx);
 }
 
-export default { async fetch(request, env, ctx) { return handle(request, env, ctx); } };
+export default {
+  async fetch(request, env, ctx) {
+    return handle(request, env, ctx);
+  },
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(
+      watchdog(env, `cron:${controller.cron}`).catch((error) => {
+        console.error("Scheduled OCI watchdog failed", error);
+      })
+    );
+  },
+};
