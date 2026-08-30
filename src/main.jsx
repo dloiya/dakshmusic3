@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
+// Production frontend and API are served by the same Worker. Keep the API
+// relative by default so Vite does not bake a localhost URL into production.
 const API =
   import.meta.env.VITE_QUEUE_API_URL?.replace(/\/$/, "") ||
-  "http://127.0.0.1:8787";
+  "";
 
 const DEEZER = "https://api.deezer.com";
 
@@ -260,7 +262,7 @@ function App() {
       case "Settings":
         return (
           <div className="empty">
-            Queue API: <code>{API}</code>
+            Queue API: <code>{API || window.location.origin}</code>
           </div>
         );
       default:
