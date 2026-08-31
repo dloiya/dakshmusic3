@@ -48,8 +48,8 @@ const fmtTime = (s) => {
   return `${m}:${String(sec).padStart(2, "0")}`;
 };
 
-const TABS = [
-  { key: "Now Playing", label: "Listen Now", icon: "disc" },
+const MENU_ITEMS = [
+  { key: "Now Playing", label: "Now Playing", icon: "disc" },
   { key: "Playlist", label: "Playlist", icon: "list" },
   { key: "Search", label: "Search", icon: "search" },
   { key: "Album", label: "Albums", icon: "grid" },
@@ -72,7 +72,8 @@ function Icon({ name, size = 20, ...rest }) {
     case "prev": return <svg {...s}><path d="M18 5L8 12l10 7z" fill="currentColor" stroke="none" /><rect x="4.6" y="5" width="2.4" height="14" rx="1" fill="currentColor" stroke="none" /></svg>;
     case "plus": return <svg {...s}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>;
     case "x": return <svg {...s}><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>;
-    case "chevron": return <svg {...s}><path d="M9 6l6 6-6 6" /></svg>;
+    case "chevron-left": return <svg {...s}><path d="M15 6l-6 6 6 6" /></svg>;
+    case "chevron-right": return <svg {...s}><path d="M9 6l6 6-6 6" /></svg>;
     case "upload": return <svg {...s}><path d="M12 16V4" /><path d="M6 10l6-6 6 6" /><path d="M4 20h16" /></svg>;
     case "download": return <svg {...s}><path d="M12 4v12" /><path d="M6 12l6 6 6-6" /><path d="M4 20h16" /></svg>;
     case "trash": return <svg {...s}><path d="M5 7h14" /><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2" /><path d="M7 7l1 13h8l1-13" /></svg>;
@@ -82,7 +83,8 @@ function Icon({ name, size = 20, ...rest }) {
 }
 
 function App() {
-  const [windowName, setWindowName] = useState("Now Playing");
+  const [windowName, setWindowName] = useState("home");
+  const [menuIndex, setMenuIndex] = useState(0);
   const [mode, setMode] = useState("track");
   const [current, setCurrent] = useState(null);
   const [playlist, setPlaylist] = useState([]);
@@ -98,7 +100,7 @@ function App() {
   const [playedSec, setPlayedSec] = useState(0);
   const [durationSec, setDurationSec] = useState(0);
   const [clock, setClock] = useState(() => new Date());
-  const audio = useRef(null), upload = useRef(null), touchStart = useRef(null);
+  const audio = useRef(null), upload = useRef(null), wheelStart = useRef(null);
 
   useEffect(() => { const id = setInterval(() => setClock(new Date()), 30000); return () => clearInterval(id); }, []);
   useEffect(() => { if (!message) return; const t = setTimeout(() => setMessage(""), 2600); return () => clearTimeout(t); }, [message]);
@@ -153,7 +155,24 @@ function App() {
     };
   }, [current, queue, playlist]);
 
-  const open = (name) => setWindowName(name);
+  const open = (name) => { setWindowName(name); setMenuIndex(Math.max(0, MENU_ITEMS.findIndex((m) => m.key === name))); };
+  const home = () => setWindowName("home");
+  const moveMenu = (d) => setMenuIndex((i) => (i + d + MENU_ITEMS.length) % MENU_ITEMS.length);
+  const selectMenu = (index) => open(MENU_ITEMS[index ?? menuIndex].key);
+
+  const handleWheelPointerDown = (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    wheelStart.current = { x: e.clientX, y: e.clientY };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const handleWheelPointerUp = (e) => {
+    const s = wheelStart.current; if (!s) return;
+    wheelStart.current = null;
+    const dx = e.clientX - s.x, dy = e.clientY - s.y;
+    if (Math.abs(dy) > 20 && Math.abs(dy) > Math.abs(dx)) { moveMenu(dy > 0 ? -1 : 1); return; }
+    if (Math.abs(dx) > 20 && Math.abs(dx) > Math.abs(dy) && windowName !== "home") { dx > 0 ? home() : open("Now Playing"); return; }
+    if (windowName === "home" && Math.abs(dx) < 20 && Math.abs(dy) < 20) selectMenu();
+  };
 
   const switchMode = async (target) => {
     if (target === mode) return true;
@@ -230,18 +249,7 @@ function App() {
     } catch (e) { setMessage(e.message); }
   };
 
-  const onTouchStart = (e) => { const t = e.touches?.[0]; if (t) touchStart.current = { x: t.clientX, y: t.clientY }; };
-  const onTouchEnd = (e) => {
-    const s = touchStart.current; touchStart.current = null; if (!s) return;
-    const t = e.changedTouches?.[0]; if (!t) return;
-    const dx = t.clientX - s.x, dy = t.clientY - s.y;
-    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.4) return;
-    const i = TABS.findIndex((x) => x.key === windowName); if (i < 0) return;
-    open(TABS[(i + (dx < 0 ? 1 : -1) + TABS.length) % TABS.length].key);
-  };
-
   const preview = getPreview(current);
-  const showMini = windowName !== "Now Playing" && current;
 
   return (
     <main className="ipod-page">
@@ -249,14 +257,25 @@ function App() {
         <div className="screen">
           <audio ref={audio} src={preview || undefined} preload="none" />
           <header className="status-bar">
-            <span className="time">{clock.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
-            <span className="status-title">{TABS.find((t) => t.key === windowName)?.label}</span>
-            <span className={`live-dot ${isPlaying ? "on" : ""}`} />
+            <button type="button" className="brand" onClick={home}>daksh music</button>
+            <span className="status-right">
+              <span className="time">{clock.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+              <span className={`live-dot ${isPlaying ? "on" : ""}`} />
+            </span>
           </header>
 
           {message && <div className="toast">{message}</div>}
 
-          <div className="screen-body" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+          {windowName !== "home" && (
+            <div className="window-header">
+              <button type="button" onClick={home} aria-label="Back"><Icon name="chevron-left" size={20} /></button>
+              <strong>{MENU_ITEMS.find((m) => m.key === windowName)?.label}</strong>
+              <span />
+            </div>
+          )}
+
+          <div className="screen-body">
+            {windowName === "home" && <Home items={MENU_ITEMS} index={menuIndex} onSelect={selectMenu} />}
             {windowName === "Now Playing" && (
               <NowPlaying current={current} mode={mode} isPlaying={isPlaying} playedSec={playedSec} durationSec={durationSec} togglePlay={togglePlay} next={next} prev={prev} seek={seek} preview={preview} />
             )}
@@ -267,26 +286,39 @@ function App() {
             {windowName === "Settings" && <Settings settingsTab={settingsTab} setSettingsTab={setSettingsTab} mode={mode} exportCsv={exportCsv} upload={() => upload.current?.click()} deleteData={deleteData} />}
             <input ref={upload} hidden type="file" accept=".csv,text/csv" onChange={importCsv} />
           </div>
-
-          {showMini && <MiniPlayer current={current} isPlaying={isPlaying} togglePlay={togglePlay} next={next} onOpen={() => open("Now Playing")} />}
-          <TabBar tabs={TABS} active={windowName} onSelect={open} />
         </div>
-        <button type="button" className="home-indicator" aria-label="Home" onClick={() => open("Now Playing")} />
+
+        <div className="wheel-area">
+          <div className="wheel" onPointerDown={handleWheelPointerDown} onPointerUp={handleWheelPointerUp} onPointerCancel={() => { wheelStart.current = null; }}>
+            <button type="button" className="wheel-btn wheel-menu" onClick={(e) => { e.stopPropagation(); home(); }}>MENU</button>
+            <button type="button" className="wheel-btn wheel-prev" aria-label="Previous track" onClick={(e) => { e.stopPropagation(); prev(); }}><Icon name="prev" size={16} /></button>
+            <button type="button" className="wheel-btn wheel-next" aria-label="Next track" onClick={(e) => { e.stopPropagation(); next(); }}><Icon name="next" size={16} /></button>
+            <button type="button" className="wheel-btn wheel-play" aria-label="Play or pause" onClick={(e) => { e.stopPropagation(); togglePlay(); }}><Icon name={isPlaying ? "pause" : "play"} size={16} /></button>
+            <button
+              type="button"
+              className="wheel-center"
+              aria-label="Select"
+              onClick={(e) => { e.stopPropagation(); windowName === "home" ? selectMenu() : togglePlay(); }}
+            />
+          </div>
+        </div>
+        <footer className="footer">daksh music · {mode} mode</footer>
       </section>
     </main>
   );
 }
 
-function MiniPlayer({ current, isPlaying, togglePlay, next, onOpen }) {
+function Home({ items, index, onSelect }) {
   return (
-    <div className="mini-player">
-      <button type="button" className="mini-tap" onClick={onOpen}>
-        <span className="mini-art">{current?.artwork_url ? <img src={current.artwork_url} alt="" /> : <Icon name="note" size={16} />}</span>
-        <span className="mini-meta"><strong>{current?.title}</strong><small>{current?.artist}</small></span>
-      </button>
-      <button type="button" className="round-btn" onClick={(e) => { e.stopPropagation(); togglePlay(); }}><Icon name={isPlaying ? "pause" : "play"} size={16} /></button>
-      <button type="button" className="round-btn" onClick={(e) => { e.stopPropagation(); next(); }}><Icon name="next" size={14} /></button>
-    </div>
+    <nav className="menu-list">
+      {items.map((item, i) => (
+        <button type="button" key={item.key} className={`menu-row ${i === index ? "selected" : ""}`} onClick={() => onSelect(i)}>
+          <span className="menu-row-icon"><Icon name={item.icon} size={16} /></span>
+          <span className="menu-row-label">{item.label}</span>
+          <Icon name="chevron-right" size={16} />
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -300,18 +332,18 @@ function NowPlaying({ current, mode, isPlaying, playedSec, durationSec, togglePl
     <div className="now-playing">
       <div className="np-bg" style={current?.artwork_url ? { backgroundImage: `url(${current.artwork_url})` } : undefined} />
       <div className="np-content">
-        <div className="np-art">{current?.artwork_url ? <img src={current.artwork_url} alt="" /> : <Icon name="note" size={40} />}</div>
+        <div className="np-art">{current?.artwork_url ? <img src={current.artwork_url} alt="" /> : <Icon name="note" size={36} />}</div>
         <div className="np-meta">
           <strong>{current?.title || "Nothing playing"}</strong>
-          <small>{current?.artist || "Pick a song to get started"}</small>
+          <small>{current?.artist || "Select a song from the menu"}</small>
           {current?.album_name && <small className="np-album">{current.album_name}</small>}
         </div>
         <div className="np-progress" onClick={onScrub}><div className="np-progress-fill" style={{ width: `${pct}%` }} /></div>
         <div className="np-times"><span>{fmtTime(playedSec)}</span><span>{fmtTime(durationSec)}</span></div>
         <div className="np-controls">
-          <button type="button" className="round-btn lg" onClick={prev}><Icon name="prev" size={18} /></button>
-          <button type="button" className="round-btn xl accent" onClick={togglePlay}><Icon name={isPlaying ? "pause" : "play"} size={24} /></button>
-          <button type="button" className="round-btn lg" onClick={next}><Icon name="next" size={18} /></button>
+          <button type="button" className="round-btn lg" onClick={prev}><Icon name="prev" size={16} /></button>
+          <button type="button" className="round-btn xl accent" onClick={togglePlay}><Icon name={isPlaying ? "pause" : "play"} size={22} /></button>
+          <button type="button" className="round-btn lg" onClick={next}><Icon name="next" size={16} /></button>
         </div>
         {current && !preview && <small className="np-note">No preview available for this track</small>}
         <small className="np-mode">{mode} mode</small>
@@ -403,7 +435,7 @@ function Settings({ settingsTab, setSettingsTab, mode, exportCsv, upload, delete
       <div className="grouped-list">
         {items.map(([k, v]) => (
           <button type="button" key={k} className={`grouped-row ${settingsTab === k ? "active" : ""} ${k === "delete" ? "danger" : ""}`} onClick={() => setSettingsTab(k)}>
-            <span>{v}</span><Icon name="chevron" size={14} />
+            <span>{v}</span><Icon name="chevron-right" size={14} />
           </button>
         ))}
       </div>
@@ -427,18 +459,5 @@ function Settings({ settingsTab, setSettingsTab, mode, exportCsv, upload, delete
 }
 
 function Empty({ text }) { return <div className="empty">{text}</div>; }
-
-function TabBar({ tabs, active, onSelect }) {
-  return (
-    <nav className="tab-bar">
-      {tabs.map((t) => (
-        <button type="button" key={t.key} className={`tab-btn ${active === t.key ? "active" : ""}`} onClick={() => onSelect(t.key)}>
-          <Icon name={t.icon} size={19} />
-          <span>{t.label}</span>
-        </button>
-      ))}
-    </nav>
-  );
-}
 
 createRoot(document.getElementById("root")).render(<App />);
