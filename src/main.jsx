@@ -5,7 +5,7 @@ import"./styles.css";
 const API=import.meta.env.VITE_QUEUE_API_URL?.replace(/\/$/,"")||"";
 const request=async(path,options={})=>{const r=await fetch(`${API}${path}`,{...options,headers:{...(options.body?{"Content-Type":options.headers?.["Content-Type"]||"application/json"}:{}),...(options.headers||{})}});if(!r.ok){const d=await r.json().catch(()=>({}));throw Error(d.error||`API error ${r.status}`)}return r};
 const json=async(path,options={})=>(await request(path,options)).json();
-const deezerTrack=x=>({title:x.title,artist:x.artist?.name||"Unknown artist",album_id:x.album?.id??null,album_name:x.album?.title??null,source:"deezer",source_id:String(x.id),source_url:`https://www.deezer.com/track/${x.id}`,artwork_url:x.album?.cover_xl||x.album?.cover_medium||null,duration_ms:Number(x.duration||0)*1000,metadata_json:{deezer:x}});
+const deezerTrack=x=>({title:x.title,artist:x.artist?.name||"Unknown artist",album_id:null,album_name:x.album?.title??null,source:"deezer",source_id:String(x.id),source_url:`https://www.deezer.com/track/${x.id}`,artwork_url:x.album?.cover_xl||x.album?.cover_medium||null,duration_ms:Number(x.duration||0)*1000,metadata_json:{deezer:x,deezer_album_id:x.album?.id??null}});
 const MENU=["Now Playing","Playlist","Search","Album","Queue","Settings"];
 
 function App(){
