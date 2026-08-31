@@ -3,34 +3,74 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#050506" />
+    <meta name="theme-color" content="#f5f5f7" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>Daksh Music</title>
+    <style>
+      :root {
+        --bg: #f2f2f4 !important;
+        --surface: #ffffff !important;
+        --surface-2: #e5e5ea !important;
+        --surface-3: rgba(0, 0, 0, 0.055) !important;
+        --hairline: rgba(0, 0, 0, 0.12) !important;
+        --ink: #111111 !important;
+        --ink-dim: #6e6e73 !important;
+        --ink-faint: #8e8e93 !important;
+        --accent-a: #007aff !important;
+        --accent-b: #007aff !important;
+        --accent-grad: linear-gradient(180deg, #0a84ff, #007aff) !important;
+      }
+      html, body { background: var(--bg) !important; color: var(--ink) !important; }
+      .ipod-page {
+        background: linear-gradient(180deg, #fafafa 0%, #ededf0 100%) !important;
+      }
+      .ipod {
+        background: linear-gradient(160deg, #ffffff 0%, #f2f2f4 42%, #d1d1d6 100%) !important;
+        box-shadow: inset 0 1px 1px rgba(255,255,255,.95), inset 0 -1px 2px rgba(0,0,0,.16), 0 28px 70px rgba(0,0,0,.22), 0 6px 16px rgba(0,0,0,.16) !important;
+      }
+      .screen {
+        background: #ffffff !important;
+        box-shadow: inset 0 0 0 1px rgba(0,0,0,.12), inset 0 1px 5px rgba(0,0,0,.06), 0 1px rgba(255,255,255,.9) !important;
+      }
+      .status-bar, .window-header { background: #ffffff !important; color: var(--ink) !important; }
+      .brand, .window-header strong, .menu-row, .grouped-row, .row-copy strong { color: var(--ink) !important; }
+      .menu-row.selected { background: var(--accent-grad) !important; color: #fff !important; }
+      .menu-row.selected .menu-row-icon, .menu-row.selected svg:last-child { color: #fff !important; }
+      .search-bar, .grouped-list, .card, .row-thumb, .icon-btn { background: #f2f2f7 !important; }
+      .search-bar input { color: #111 !important; }
+      .search-bar input::placeholder { color: #8e8e93 !important; }
+      .np-bg { filter: blur(30px) saturate(1.2) brightness(1.15) !important; opacity: .28 !important; }
+      .now-playing::before { background: linear-gradient(180deg, rgba(255,255,255,.55), rgba(255,255,255,.9) 75%, #fff 100%) !important; }
+      .np-meta strong, .np-meta small, .np-mode, .np-note { color: var(--ink) !important; }
+      .np-meta small, .np-album, .np-mode, .np-note, .np-times { color: var(--ink-dim) !important; }
+      .np-art { background: linear-gradient(135deg, #e5e5ea, #c7c7cc) !important; box-shadow: 0 12px 24px rgba(0,0,0,.18) !important; }
+      .np-progress { background: rgba(0,0,0,.12) !important; }
+      .round-btn { background: rgba(0,0,0,.07) !important; color: #111 !important; }
+      .round-btn.lg { background: transparent !important; }
+      .round-btn.accent { background: var(--accent-grad) !important; color: #fff !important; box-shadow: 0 6px 16px rgba(0,122,255,.25) !important; }
+      .pill-btn { background: var(--accent-grad) !important; }
+      .wheel {
+        background: radial-gradient(circle at 32% 26%, rgba(255,255,255,.98), rgba(255,255,255,0) 40%), conic-gradient(from 210deg, #eeeeF0, #cfcfd3 25%, #f8f8fa 50%, #cfcfd3 75%, #eeeeF0) !important;
+        box-shadow: inset 0 2px 4px rgba(255,255,255,.95), inset 0 -3px 8px rgba(0,0,0,.16), 0 10px 20px rgba(0,0,0,.12) !important;
+      }
+      .window-header button { color: #007aff !important; }
+      .row.active .row-copy strong, .grouped-row.active { color: #007aff !important; }
+      .toast { background: rgba(35,35,38,.92) !important; color: #fff !important; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
     <script>
-      // Deezer does not expose the search endpoint for browser CORS use.
-      // Keep the React search code unchanged, but route Deezer search requests
-      // through the same-origin Cloudflare Worker endpoint in production.
       (() => {
         const nativeFetch = window.fetch.bind(window);
         window.fetch = (input, init) => {
           try {
-            const url = new URL(
-              typeof input === "string" ? input : input.url,
-              window.location.href,
-            );
-            if (
-              url.hostname === "api.deezer.com" &&
-              url.pathname === "/search"
-            ) {
+            const url = new URL(typeof input === "string" ? input : input.url, window.location.href);
+            if (url.hostname === "api.deezer.com" && url.pathname === "/search") {
               return nativeFetch(`/api/search${url.search}`, init);
             }
-          } catch (_) {
-            // Fall through to the native fetch for malformed/non-URL inputs.
-          }
+          } catch (_) {}
           return nativeFetch(input, init);
         };
       })();
