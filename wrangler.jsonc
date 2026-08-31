@@ -28,11 +28,6 @@
         "queue": "dakshmusic3-metadata"
       }
     ],
-    "consumers": [
-      {
-        "queue": "dakshmusic3-metadata"
-      }
-    ]
   },
   "d1_databases": [
     {
