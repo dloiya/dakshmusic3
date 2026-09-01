@@ -126,8 +126,6 @@ async function buildTrackQueue(env, selected) {
     }
   }
 
-  // If we only know the selected track, fall back to the artist's most-played
-  // cached/catalogued tracks.
   if (tracks.length === 1 && selected.artist) {
     const artist = await env.DB.prepare(
       `SELECT id,title,artist,album_id,album_name,source,source_id,source_url,
@@ -272,12 +270,15 @@ async function processAcquisitionMessage(message, env) {
      WHERE id=?`
   ).bind(now(), now(), jobId).run();
 
-  const base = String(env.OCI_RETRIEVER_URL || env.OCI_API_URL || "").replace(/\/$/, "");
-  if (!base) throw new Error("OCI_RETRIEVER_URL is not configured");
+  const base = String(env.OCI_API_URL || "").replace(/\/+$/, "");
+  if (!base) throw new Error("OCI_API_URL is not configured");
   if (!env.OCI_API_TOKEN) throw new Error("OCI_API_TOKEN is not configured");
 
   const encoded = encodeURIComponent(String(track.source_url));
-  const upstream = await fetch(`${base}/acquire/${encoded}`, {
+  const acquireUrl = `${base}/acquire/${encoded}`;
+  console.log("[ACQUIRE] calling OCI:", acquireUrl);
+
+  const upstream = await fetch(acquireUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.OCI_API_TOKEN}`,
@@ -296,6 +297,8 @@ async function processAcquisitionMessage(message, env) {
   });
 
   const text = await upstream.text();
+  console.log("[ACQUIRE] OCI response:", upstream.status, text);
+
   let data = {};
   try { data = JSON.parse(text); } catch { data = { detail: text }; }
 
