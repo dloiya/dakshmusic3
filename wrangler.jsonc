@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "dakshmusic3",
+  "name": "dakshmusic3-test",
   "main": "worker/entry.js",
   "compatibility_date": "2026-08-29",
   "observability": {
@@ -27,6 +27,14 @@
       {
         "binding": "METADATA_QUEUE",
         "queue": "dakshmusic3-metadata"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "dakshmusic3-metadata",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 3
       }
     ]
   },
