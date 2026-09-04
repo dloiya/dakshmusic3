@@ -4,196 +4,158 @@ Base URL:
 
 `https://<worker-host>`
 
+The Worker has one HTTP API router. `worker/entry.js` is only the Cloudflare runtime entrypoint; API routes are implemented in `worker/router.js`.
+
 All JSON requests must use:
 
 `Content-Type: application/json`
 
-## GET /api/health
+## System
+
+### GET /api/health
 
 Returns Worker/D1 availability.
 
-Response:
+### POST /api/start
 
-```json
-{
-  "ok": true,
-  "service": "dakshmusic3-queue"
-}
-```
+Starts the OCI retriever instance through the Worker-side OCI client.
 
-## GET /api/queue?queue_key=default
+### POST /api/watchdog
 
-Returns the current queue.
+Runs the OCI instance health/recovery check manually. The same check runs from the Worker cron trigger.
 
-Response:
+## Search
 
-```json
-{
-  "queue_key": "default",
-  "state": {
-    "current_index": 0,
-    "mode": "playlist",
-    "shuffle_enabled": 1
-  },
-  "tracks": [
-    {
-      "queue_entry_id": 1,
-      "position": 0,
-      "id": 123,
-      "title": "Behold",
-      "artist": "JID",
-      "album_id": 456,
-      "album_name": "The Forever Story",
-      "source": "deezer",
-      "source_id": "3399059211",
-      "source_url": "https://www.deezer.com/track/3399059211",
-      "artwork_url": "...",
-      "duration_ms": 200000,
-      "storage_key": "music/...",
-      "storage_status": "ready"
-    }
-  ]
-}
-```
+### GET /api/search?q=<query>&limit=25
 
-## POST /api/queue/initialize
+Searches Deezer and returns the upstream search payload.
 
-Creates a queue if one does not already exist.
+## Library
 
-The initial playlist queue is 20 entries:
+### GET /api/library/tracks?limit=500
 
-- 5 random tracks from the logical Top Cache
-- 15 random tracks from the track catalog
+Returns the stored track catalog.
 
-The implementation deliberately avoids duplicating a track inside the queue.
+### GET /api/library/albums?limit=500
+
+Returns the logical album list derived from tracks.
+
+### GET /api/library/albums/:albumId
+
+Returns an album and its tracks.
+
+### GET /api/albums/history
+
+Returns recently played albums.
+
+## Tracks
+
+### POST /api/tracks/resolve
+
+Upserts a resolved source track into D1 and returns its local track ID.
 
 Request:
 
 ```json
 {
-  "queue_key": "default"
+  "title": "Behold",
+  "artist": "JID",
+  "album_id": 456,
+  "album_name": "The Forever Story",
+  "source": "deezer",
+  "source_id": "3399059211",
+  "source_url": "https://www.deezer.com/track/3399059211",
+  "artwork_url": "...",
+  "duration_ms": 200000,
+  "isrc": null,
+  "metadata_json": {}
 }
 ```
 
-Response:
+If `album_id` is supplied, the parent album is created/updated before the track row, preserving the D1 foreign-key relationship.
 
-```json
-{
-  "queue_key": "default",
-  "created": true,
-  "count": 20
-}
-```
+## Playlist
 
-If a queue already exists:
+### GET /api/playlist
 
-```json
-{
-  "queue_key": "default",
-  "created": false,
-  "count": 20
-}
-```
+Returns the default playlist.
 
-## POST /api/queue/add
+### POST /api/playlist
 
-Adds an already-resolved Deezer result to D1 and the queue.
+Adds an existing track to the default playlist.
 
-Request:
+### DELETE /api/playlist/:entryId
 
-```json
-{
-  "queue_key": "default",
-  "track": {
-    "title": "Behold",
-    "artist": "JID",
-    "album_id": 456,
-    "album_name": "The Forever Story",
-    "source": "deezer",
-    "source_id": "3399059211",
-    "source_url": "https://www.deezer.com/track/3399059211",
-    "artwork_url": "...",
-    "duration_ms": 200000,
-    "isrc": null,
-    "metadata_json": {}
-  }
-}
-```
+Removes a playlist entry.
 
-Response:
+## Playback
 
-```json
-{
-  "ok": true,
-  "track_id": 123,
-  "queue_entry_id": 99,
-  "position": 20
-}
-```
+### POST /api/playback/mode
 
-## DELETE /api/queue/:entryId
+Sets playback mode to `track` or `album`.
+
+### POST /api/play/track
+
+Starts playback preparation for a track and schedules acquisition if the file is not already cached.
+
+### POST /api/play/album/:albumId
+
+Creates the current album queue, records album history, and schedules acquisition for the album tracks.
+
+## Queue
+
+### GET /api/queue?queue_key=default
+
+Returns queue state and tracks.
+
+### POST /api/queue/add
+
+Adds an already-resolved track to a queue. The queue parent is created automatically when necessary.
+
+### DELETE /api/queue/:entryId
 
 Removes a queue entry.
 
-Response:
+### POST /api/queue/next
 
-```json
-{
-  "ok": true
-}
-```
+Advances the current queue index.
 
-## POST /api/queue/next
+### POST /api/queue/shuffle
 
-Advances the current index.
+Sets shuffle state.
 
-Request:
+## Acquisition
 
-```json
-{
-  "queue_key": "default"
-}
-```
+### GET /api/acquisition?limit=20
 
-Response:
+Returns recent acquisition jobs.
 
-```json
-{
-  "ok": true,
-  "current_index": 1
-}
-```
+### POST /api/acquisition
 
-## POST /api/queue/shuffle
-
-Toggles or sets shuffle state.
+Creates or reuses an acquisition job for a track. Acquisition is dispatched directly to the OCI retriever in the Worker background task; the HTTP request does not expose the retriever implementation to the frontend.
 
 Request:
 
 ```json
 {
-  "queue_key": "default",
-  "enabled": true
+  "track_id": 123,
+  "priority": "normal"
 }
 ```
 
-## GET /api/acquisition?limit=20
+## Library import/export
 
-Returns recent acquisition jobs from D1.
+### GET /api/export/tracks.csv
 
-## POST /api/acquisition
+Exports the track catalog as CSV.
 
-Creates an acquisition job for a track.
+### POST /api/import/tracks.csv
 
-Request:
+Imports track rows from CSV.
 
-```json
-{
-  "track_id": 123
-}
-```
+### POST /api/data/delete
 
-The Worker records the job. OCI acquisition orchestration is intentionally separated from queue state; wire `OCI_API_URL` in the Worker environment when the executor is enabled.
+Deletes library, queue, playlist, acquisition, and playback-history data after receiving `{ "confirm": "DELETE" }`.
 
 ## Error format
 
