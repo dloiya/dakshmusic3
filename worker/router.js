@@ -55,7 +55,57 @@ async function ensureAcquisition(env,trackId,priority="normal",ctx=null){
 }
 async function deezerSearch(request){const u=new URL(request.url),q=u.searchParams.get("q")?.trim(),limit=Math.min(Math.max(Number(u.searchParams.get("limit")||25),1),50);if(!q)return error(request,"Missing q");const d=new URL("https://api.deezer.com/search");d.searchParams.set("q",q);d.searchParams.set("limit",String(limit));const r=await fetch(d,{headers:{accept:"application/json"}});if(!r.ok)return error(request,`Deezer search failed: HTTP ${r.status}`,502);const data=await r.json();if(data?.error)return error(request,data.error.message||"Deezer search failed",502);return json(data,200,request,{"cache-control":"public, max-age=60, s-maxage=300"});}
 async function ensureHistory(db){await db.prepare(`CREATE TABLE IF NOT EXISTS album_play_history (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, album_name TEXT, artist TEXT, artwork_url TEXT, played_at TEXT NOT NULL)`).run();}
-async function upsertTrack(db,t){if(!t?.title||!t?.artist||!t?.source||!t?.source_id||!t?.source_url)throw new Error("title, artist, source, source_id and source_url are required");const v=[String(t.title),String(t.artist),t.album_id==null?null:Number(t.album_id),t.album_name||null,String(t.source),String(t.source_id),String(t.source_url),t.isrc||null,t.duration_ms==null?null:Number(t.duration_ms),t.artwork_url||null,t.metadata_json?JSON.stringify(t.metadata_json):null],e=await db.prepare(`SELECT id FROM tracks WHERE source=? AND source_id=? LIMIT 1`).bind(v[4],v[5]).first(),ts=now();if(e){await db.prepare(`UPDATE tracks SET title=?,artist=?,album_id=?,album_name=?,source_url=?,isrc=?,duration_ms=?,artwork_url=?,metadata_json=?,updated_at=? WHERE id=?`).bind(v[0],v[1],v[2],v[3],v[6],v[7],v[8],v[9],v[10],ts,e.id).run();return Number(e.id);}const r=await db.prepare(`INSERT INTO tracks(title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?, 'missing',0,0,?,?,?)`).bind(...v.slice(0,10),ts,ts,v[10]).run();return Number(r.meta.last_row_id);}
+async function upsertTrack(db,t){
+  if(!t?.title||!t?.artist||!t?.source||!t?.source_id||!t?.source_url)throw new Error("title, artist, source, source_id and source_url are required");
+  const albumId=t.album_id==null?null:Number(t.album_id);
+  const albumName=t.album_name||null;
+  const source=String(t.source);
+  const sourceId=String(t.source_id);
+  const sourceUrl=String(t.source_url);
+  const artwork=t.artwork_url||null;
+  const metadata=t.metadata_json?JSON.stringify(t.metadata_json):null;
+  const duration=t.duration_ms==null?null:Number(t.duration_ms);
+  const title=String(t.title);
+  const artist=String(t.artist);
+  const ts=now();
+
+  // tracks.album_id is a foreign key in the deployed D1 schema.
+  // Resolve/create the parent album before writing the track.
+  if(albumId!=null){
+    await db.prepare(`INSERT INTO albums(id,title,artist,source,source_id,artwork_url,year,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,NULL,?,?)
+      ON CONFLICT(id) DO UPDATE SET
+        title=excluded.title,
+        artist=excluded.artist,
+        source=excluded.source,
+        source_id=excluded.source_id,
+        artwork_url=excluded.artwork_url,
+        updated_at=excluded.updated_at`).bind(
+      albumId,
+      albumName||"Unknown Album",
+      artist,
+      source,
+      albumId!=null?String(albumId):sourceId,
+      artwork,
+      ts,
+      ts
+    ).run();
+  }
+
+  const existing=await db.prepare(`SELECT id FROM tracks WHERE source=? AND source_id=? LIMIT 1`).bind(source,sourceId).first();
+  if(existing){
+    await db.prepare(`UPDATE tracks SET title=?,artist=?,album_id=?,album_name=?,source_url=?,isrc=?,duration_ms=?,artwork_url=?,metadata_json=?,updated_at=? WHERE id=?`).bind(
+      title,artist,albumId,albumName,sourceUrl,t.isrc||null,duration,artwork,metadata,ts,existing.id
+    ).run();
+    return Number(existing.id);
+  }
+
+  const r=await db.prepare(`INSERT INTO tracks(title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?, 'missing',0,0,?,?,?)`).bind(
+    title,artist,albumId,albumName,source,sourceId,sourceUrl,t.isrc||null,duration,artwork,ts,ts,metadata
+  ).run();
+  return Number(r.meta.last_row_id);
+}
 async function trackRows(db,limit=2000){const r=await db.prepare(`SELECT id,title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_key,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json FROM tracks ORDER BY artist,title LIMIT ?`).bind(limit).all();return r.results||[];}
 async function albumRows(db,id){const r=await db.prepare(`SELECT id,title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_key,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json FROM tracks WHERE album_id=? ORDER BY id`).bind(Number(id)).all();return r.results||[];}
 async function albumList(db,limit=1000){const r=await db.prepare(`SELECT album_id AS id,album_name AS title,MAX(artist) AS artist,MAX(artwork_url) AS artwork_url,COUNT(*) AS track_count,MAX(updated_at) AS updated_at FROM tracks WHERE album_id IS NOT NULL GROUP BY album_id,album_name ORDER BY artist,album_name LIMIT ?`).bind(limit).all();return r.results||[];}
