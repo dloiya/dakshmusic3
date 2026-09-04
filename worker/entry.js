@@ -1,4 +1,5 @@
 import router from "./router.js";
+import { getInstance, instanceAction } from "./oci.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const now = () => new Date().toISOString();
@@ -23,6 +24,24 @@ function json(data, status = 200, request = null) {
 
 function error(request, message, status = 400) {
   return json({ error: message }, status, request);
+}
+
+// queue_entries.queue_key is backed by queue_state.queue_key in production.
+// The album playback route writes to "album-current", so both queue parents
+// must exist before router.js can insert queue entries.
+async function ensureQueueParents(env) {
+  const t = now();
+  await env.DB.prepare(
+    `INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at)
+     VALUES ('default',0,'track',1,?)
+     ON CONFLICT(queue_key) DO NOTHING`
+  ).bind(t).run();
+
+  await env.DB.prepare(
+    `INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at)
+     VALUES ('album-current',0,'album',1,?)
+     ON CONFLICT(queue_key) DO NOTHING`
+  ).bind(t).run();
 }
 
 async function queueAcquisition(env, trackId, priority = "normal") {
@@ -139,7 +158,7 @@ async function processAcquisitionMessage(message, env) {
   } else {
     await env.DB.prepare(
       `UPDATE acquisition_jobs SET status='running',updated_at=?,error=NULL WHERE id=?`
-    ).bind(now(), jobId).run();
+    ).bind(now(), now(), jobId).run();
     await env.DB.prepare(
       `UPDATE tracks SET storage_status='downloading',cache_requested=1,updated_at=? WHERE id=?`
     ).bind(now(), trackId).run();
@@ -155,6 +174,24 @@ export default {
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
+    }
+
+    // Initialize both queue parents before router.js can insert queue_entries.
+    // This fixes the production D1 FOREIGN KEY constraint on queue_key,
+    // particularly for album playback using "album-current".
+    if (
+      path === "/api/playback/mode" ||
+      path.startsWith("/api/play/album/") ||
+      path === "/api/queue" ||
+      path === "/api/queue/next" ||
+      path === "/api/queue/add"
+    ) {
+      try {
+        await ensureQueueParents(env);
+      } catch (e) {
+        console.error("Failed to initialize queue parents:", e);
+        return error(request, e?.message || "Failed to initialize queue", 500);
+      }
     }
 
     if (path === "/api/acquisition" && request.method === "POST") {
