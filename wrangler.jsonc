@@ -23,22 +23,6 @@
     "DEFAULT_QUEUE_KEY": "default",
     "OCI_API_URL": "http://137-23-48-247.sslip.io:8787"
   },
-  "queues": {
-    "producers": [
-      {
-        "binding": "METADATA_QUEUE",
-        "queue": "dakshmusic3-metadata"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "dakshmusic3-metadata",
-        "max_batch_size": 5,
-        "max_batch_timeout": 5,
-        "max_retries": 3
-      }
-    ]
-  },
   "d1_databases": [
     {
       "binding": "DB",
