@@ -1,4 +1,3 @@
-import legacy from "./index.js";
 import { getInstance, instanceAction } from "./oci.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -37,18 +36,10 @@ async function ensureAcquisition(env,trackId,priority="normal",ctx=null){
       const storageKey=d.storage_key||d.key||d.r2_key||null;
       const status=["ready","completed","complete","success"].includes(String(d.status||"").toLowerCase())||!!storageKey?"completed":"running";
       await env.DB.prepare(`UPDATE acquisition_jobs SET status=?,updated_at=?,completed_at=?,error=NULL WHERE id=?`).bind(status,now(),status==="completed"?now():null,jid).run();
-      if(storageKey){
-        await env.DB.prepare(`UPDATE tracks SET storage_key=?,storage_status='ready',cache_requested=1,updated_at=? WHERE id=?`).bind(String(storageKey),now(),Number(track.id)).run();
-      }else if(status==="completed"){
-        await env.DB.prepare(`UPDATE tracks SET storage_status='ready',cache_requested=1,updated_at=? WHERE id=?`).bind(now(),Number(track.id)).run();
-      }else{
-        await env.DB.prepare(`UPDATE tracks SET storage_status='downloading',cache_requested=1,updated_at=? WHERE id=?`).bind(now(),Number(track.id)).run();
-      }
-    }catch(e){
-      console.error("OCI retriever job failed",jid,e);
-      await env.DB.prepare(`UPDATE acquisition_jobs SET status='failed',updated_at=?,completed_at=?,error=? WHERE id=?`).bind(now(),now(),String(e?.message||e),jid).run();
-      await env.DB.prepare(`UPDATE tracks SET storage_status='failed',updated_at=? WHERE id=?`).bind(now(),Number(track.id)).run();
-    }
+      if(storageKey){await env.DB.prepare(`UPDATE tracks SET storage_key=?,storage_status='ready',cache_requested=1,updated_at=? WHERE id=?`).bind(String(storageKey),now(),Number(track.id)).run();}
+      else if(status==="completed"){await env.DB.prepare(`UPDATE tracks SET storage_status='ready',cache_requested=1,updated_at=? WHERE id=?`).bind(now(),Number(track.id)).run();}
+      else{await env.DB.prepare(`UPDATE tracks SET storage_status='downloading',cache_requested=1,updated_at=? WHERE id=?`).bind(now(),Number(track.id)).run();}
+    }catch(e){console.error("OCI retriever job failed",jid,e);await env.DB.prepare(`UPDATE acquisition_jobs SET status='failed',updated_at=?,completed_at=?,error=? WHERE id=?`).bind(now(),now(),String(e?.message||e),jid).run();await env.DB.prepare(`UPDATE tracks SET storage_status='failed',updated_at=? WHERE id=?`).bind(now(),Number(track.id)).run();}
   };
   if(ctx)ctx.waitUntil(run());else await run();
   return {job_id:jid,status:"queued",track_id:Number(track.id),priority};
@@ -57,54 +48,11 @@ async function deezerSearch(request){const u=new URL(request.url),q=u.searchPara
 async function ensureHistory(db){await db.prepare(`CREATE TABLE IF NOT EXISTS album_play_history (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, album_name TEXT, artist TEXT, artwork_url TEXT, played_at TEXT NOT NULL)`).run();}
 async function upsertTrack(db,t){
   if(!t?.title||!t?.artist||!t?.source||!t?.source_id||!t?.source_url)throw new Error("title, artist, source, source_id and source_url are required");
-  const albumId=t.album_id==null?null:Number(t.album_id);
-  const albumName=t.album_name||null;
-  const source=String(t.source);
-  const sourceId=String(t.source_id);
-  const sourceUrl=String(t.source_url);
-  const artwork=t.artwork_url||null;
-  const metadata=t.metadata_json?JSON.stringify(t.metadata_json):null;
-  const duration=t.duration_ms==null?null:Number(t.duration_ms);
-  const title=String(t.title);
-  const artist=String(t.artist);
-  const ts=now();
-
-  // tracks.album_id is a foreign key in the deployed D1 schema.
-  // Resolve/create the parent album before writing the track.
-  if(albumId!=null){
-    await db.prepare(`INSERT INTO albums(id,title,artist,source,source_id,artwork_url,year,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,NULL,?,?)
-      ON CONFLICT(id) DO UPDATE SET
-        title=excluded.title,
-        artist=excluded.artist,
-        source=excluded.source,
-        source_id=excluded.source_id,
-        artwork_url=excluded.artwork_url,
-        updated_at=excluded.updated_at`).bind(
-      albumId,
-      albumName||"Unknown Album",
-      artist,
-      source,
-      albumId!=null?String(albumId):sourceId,
-      artwork,
-      ts,
-      ts
-    ).run();
-  }
-
+  const albumId=t.album_id==null?null:Number(t.album_id),albumName=t.album_name||null,source=String(t.source),sourceId=String(t.source_id),sourceUrl=String(t.source_url),artwork=t.artwork_url||null,metadata=t.metadata_json?JSON.stringify(t.metadata_json):null,duration=t.duration_ms==null?null:Number(t.duration_ms),title=String(t.title),artist=String(t.artist),ts=now();
+  if(albumId!=null){await db.prepare(`INSERT INTO albums(id,title,artist,source,source_id,artwork_url,year,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,artist=excluded.artist,source=excluded.source,source_id=excluded.source_id,artwork_url=excluded.artwork_url,updated_at=excluded.updated_at`).bind(albumId,albumName||"Unknown Album",artist,source,String(albumId),artwork,ts,ts).run();}
   const existing=await db.prepare(`SELECT id FROM tracks WHERE source=? AND source_id=? LIMIT 1`).bind(source,sourceId).first();
-  if(existing){
-    await db.prepare(`UPDATE tracks SET title=?,artist=?,album_id=?,album_name=?,source_url=?,isrc=?,duration_ms=?,artwork_url=?,metadata_json=?,updated_at=? WHERE id=?`).bind(
-      title,artist,albumId,albumName,sourceUrl,t.isrc||null,duration,artwork,metadata,ts,existing.id
-    ).run();
-    return Number(existing.id);
-  }
-
-  const r=await db.prepare(`INSERT INTO tracks(title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json)
-    VALUES(?,?,?,?,?,?,?,?,?,?, 'missing',0,0,?,?,?)`).bind(
-    title,artist,albumId,albumName,source,sourceId,sourceUrl,t.isrc||null,duration,artwork,ts,ts,metadata
-  ).run();
-  return Number(r.meta.last_row_id);
+  if(existing){await db.prepare(`UPDATE tracks SET title=?,artist=?,album_id=?,album_name=?,source_url=?,isrc=?,duration_ms=?,artwork_url=?,metadata_json=?,updated_at=? WHERE id=?`).bind(title,artist,albumId,albumName,sourceUrl,t.isrc||null,duration,artwork,metadata,ts,existing.id).run();return Number(existing.id);}
+  const r=await db.prepare(`INSERT INTO tracks(title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?, 'missing',0,0,?,?,?)`).bind(title,artist,albumId,albumName,source,sourceId,sourceUrl,t.isrc||null,duration,artwork,ts,ts,metadata).run();return Number(r.meta.last_row_id);
 }
 async function trackRows(db,limit=2000){const r=await db.prepare(`SELECT id,title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_key,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json FROM tracks ORDER BY artist,title LIMIT ?`).bind(limit).all();return r.results||[];}
 async function albumRows(db,id){const r=await db.prepare(`SELECT id,title,artist,album_id,album_name,source,source_id,source_url,isrc,duration_ms,artwork_url,storage_key,storage_status,play_count,cache_requested,created_at,updated_at,metadata_json FROM tracks WHERE album_id=? ORDER BY id`).bind(Number(id)).all();return r.results||[];}
@@ -127,20 +75,22 @@ if(path==="/api/library/albums"&&method==="GET"){const n=Math.min(Math.max(Numbe
 const am=path.match(/^\/api\/library\/albums\/(\d+)$/);if(am&&method==="GET"){const rows=await albumRows(env.DB,am[1]);if(!rows.length)return error(request,"Album not found",404);return json({album:{id:Number(am[1]),title:rows[0].album_name,artist:rows[0].artist,artwork_url:rows[0].artwork_url,track_count:rows.length},tracks:rows},200,request);}
 if(path==="/api/tracks/resolve"&&method==="POST"){const id=await upsertTrack(env.DB,await request.json());return json({ok:true,track_id:id},200,request);}
 if(path==="/api/playlist"&&method==="GET")return json({name:"default",tracks:await playlistRows(env.DB)},200,request);
-if(path==="/api/playlist"&&method==="POST"){const b=await request.json(),id=Number(b.track_id);if(!id)return error(request,"track_id is required");const d=await env.DB.prepare(`SELECT id,position FROM playlist_entries WHERE track_id=? LIMIT 1`).bind(id).first();if(d)return json({ok:true,duplicate:true,id:Number(d.id),position:Number(d.position)},200,request);const m=await env.DB.prepare(`SELECT COALESCE(MAX(position),-1) p FROM playlist_entries`).first(),p=Number(m?.p??-1)+1,t=now(),r=await env.DB.prepare(`INSERT INTO playlist_entries(track_id,position,added_at,updated_at) VALUES(?,?,?,?)`).bind(id,p,t,t).run();return json({ok:true,id:Number(r.meta.last_row_id),position:p},201,request);}
-const pr=path.match(/^\/api\/playlist\/(\d+)$/);if(pr&&method==="DELETE"){await env.DB.prepare(`DELETE FROM playlist_entries WHERE id=?`).bind(Number(pr[1])).run();return json({ok:true},200,request);}
-if(path==="/api/playback/mode"&&method==="POST"){const b=await request.json();if(!["track","album"].includes(b.mode))return error(request,"mode must be track or album");await clearKey(env.DB,"album-current");if(b.mode==="track")await clearKey(env.DB,"default");await setMode(env.DB,b.mode);return json({ok:true,mode:b.mode},200,request);}
-if(path==="/api/play/track"&&method==="POST"){const b=await request.json(),id=Number(b.track_id);if(!id)return error(request,"track_id is required");await clearKey(env.DB,"album-current");await setMode(env.DB,"track");await env.DB.prepare(`UPDATE tracks SET play_count=COALESCE(play_count,0)+1,updated_at=? WHERE id=?`).bind(now(),id).run();const acquisition=await ensureAcquisition(env,id,"high",ctx);return json({ok:true,mode:"track",track_id:id,acquisition},200,request);}
-const pa=path.match(/^\/api\/play\/album\/(\d+)$/);if(pa&&method==="POST"){const id=Number(pa[1]),rows=await albumRows(env.DB,id);if(!rows.length)return error(request,"Album not found",404);await ensureHistory(env.DB);await clearKey(env.DB,"default");await clearKey(env.DB,"album-current");await setMode(env.DB,"album");const t=now();await env.DB.prepare(`INSERT INTO album_play_history(album_id,album_name,artist,artwork_url,played_at) VALUES(?,?,?,?,?)`).bind(id,rows[0].album_name,rows[0].artist,rows[0].artwork_url,t).run();await env.DB.prepare(`DELETE FROM album_play_history WHERE id NOT IN (SELECT id FROM album_play_history ORDER BY played_at DESC LIMIT 5)`).run();for(let i=0;i<rows.length;i++)await env.DB.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES('album-current',?,?,?,?)`).bind(rows[i].id,i,t,t).run();const jobs=[];for(let i=0;i<rows.length;i++){if(rows[i].storage_status!=="ready")jobs.push(await ensureAcquisition(env,rows[i].id,i===0?"high":"normal",ctx));}return json({ok:true,mode:"album",album_id:id,tracks:rows,acquisition_jobs:jobs},200,request);}
-if(path==="/api/albums/history"&&method==="GET"){await ensureHistory(env.DB);const r=await env.DB.prepare(`SELECT album_id,album_name AS title,artist,artwork_url,played_at FROM album_play_history ORDER BY played_at DESC LIMIT 5`).all();return json({albums:r.results||[]},200,request);}
-if(path==="/api/queue"&&method==="GET"){const key=url.searchParams.get("queue_key")||"default",state=await env.DB.prepare(`SELECT queue_key,current_index,mode,shuffle_enabled,updated_at FROM queue_state WHERE queue_key=?`).bind(key).first();return json({queue_key:key,state:state||{queue_key:key,current_index:0,mode:key==="album-current"?"album":"track",shuffle_enabled:1},tracks:await queueRows(env.DB,key)},200,request);}
-if(path==="/api/queue/next"&&method==="POST"){const b=await request.json().catch(()=>({})),key=b.queue_key||"default",rows=await queueRows(env.DB,key),state=await env.DB.prepare(`SELECT current_index,mode,shuffle_enabled FROM queue_state WHERE queue_key=?`).bind(key).first(),next=rows.length?(Number(state?.current_index||0)+1)%rows.length:0,t=now();await env.DB.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(queue_key) DO UPDATE SET current_index=excluded.current_index,updated_at=excluded.updated_at`).bind(key,next,state?.mode||"track",Number(state?.shuffle_enabled??1),t).run();return json({ok:true,current_index:next,track:rows[next]||null},200,request);}
-if(path==="/api/export/tracks.csv"&&method==="GET")return new Response(toCsv(await trackRows(env.DB,2000)),{status:200,headers:{"content-type":"text/csv; charset=utf-8","content-disposition":"attachment; filename=tracks.csv",...corsHeaders(request)}});
-if(path==="/api/import/tracks.csv"&&method==="POST"){const rows=parseCsv(await request.text());let imported=0;for(const r of rows){if(!r.title||!r.artist||!r.source||!r.source_id||!r.source_url)continue;await upsertTrack(env.DB,{...r,album_id:r.album_id?Number(r.album_id):null,duration_ms:r.duration_ms?Number(r.duration_ms):null});imported++;}return json({ok:true,imported},200,request);}
-if(path==="/api/data/delete"&&method==="POST"){const b=await request.json();if(b.confirm!=="DELETE")return error(request,"Confirmation required: DELETE");await env.DB.batch([env.DB.prepare(`DELETE FROM playlist_entries`),env.DB.prepare(`DELETE FROM queue_entries`),env.DB.prepare(`DELETE FROM queue_state`),env.DB.prepare(`DELETE FROM acquisition_jobs`),env.DB.prepare(`DELETE FROM cache_objects`),env.DB.prepare(`DELETE FROM tracks`),env.DB.prepare(`DELETE FROM album_play_history`)]);return json({ok:true},200,request);}
-const acquire=path.match(/^\/api\/acquire\/(.+)$/);if(acquire&&method==="POST"){return ociRequest(request,env,`/acquire/${acquire[1]}`,{method:"POST",body:request.body,headers:{"Content-Type":request.headers.get("Content-Type")||"application/json"}});}
-if(path==="/api/acquisition"&&method==="GET"){const n=Math.min(Math.max(Number(url.searchParams.get("limit")||20),1),100);const r=await env.DB.prepare(`SELECT a.id,a.track_id,a.status,a.worker,a.attempts,a.error,a.created_at,a.updated_at,a.started_at,a.completed_at,t.title,t.artist,t.source_url FROM acquisition_jobs a JOIN tracks t ON t.id=a.track_id ORDER BY a.created_at DESC LIMIT ?`).bind(n).all();return json({jobs:r.results||[]},200,request);}
-if(path==="/api/acquisition"&&method==="POST"){const b=await request.json(),id=Number(b.track_id);if(!id)return error(request,"track_id is required");const acquisition=await ensureAcquisition(env,id,b.priority||"normal",ctx);if(!acquisition)return error(request,"Track not found",404);return json({ok:true,...acquisition},202,request);}
-return legacy.fetch(request,env,ctx);
-}catch(e){console.error(e);return error(request,e?.message||"Internal error",500);}}
-export default{async fetch(request,env,ctx){return handle(request,env,ctx);},async queue(batch,env,ctx){for(const message of batch.messages){console.log("Processing metadata message:",message.body);message.ack();}},async scheduled(controller,env,ctx){ctx.waitUntil(watchdog(env,`cron:${controller.cron}`).catch(e=>console.error("Scheduled OCI watchdog failed",e)));}};
+if(path==="/api/playlist"&&method==="POST"){const b=await request.json(),id=Number(b.track_id);if(!id)return error(request,"track_id is required");const d=await env.DB.prepare(`SELECT id,position FROM playlist_entries WHERE track_id=? LIMIT 1`).bind(id).first();if(d)return json({ok:true,duplicate:true,id:Number(d.id),position:Number(d.position)},200,request);const m=await env.DB.prepare(`SELECT COALESCE(MAX(position),-1) p FROM playlist_entries`).first(),p=Number(m?.p??-1)+1,t=now(),r=await env.DB.prepare(`INSERT INTO playlist_entries(track_id,position,added_at,updated_at) VALUES(?,?,?,?)`).bind(id,p,t,t).run();return json({ok:true,id:Number(r.meta.last_row_id),track_id:id,position:p},200,request);}
+const pm=path.match(/^\/api\/playlist\/(\d+)$/);if(pm&&method==="DELETE"){await env.DB.prepare(`DELETE FROM playlist_entries WHERE id=?`).bind(Number(pm[1])).run();return json({ok:true},200,request);}
+if(path==="/api/queue"&&method==="GET"){const key=url.searchParams.get("queue_key")||env.DEFAULT_QUEUE_KEY||"default";const state=await env.DB.prepare(`SELECT queue_key,current_index,mode,shuffle_enabled,updated_at FROM queue_state WHERE queue_key=?`).bind(key).first()||{queue_key:key,current_index:0,mode:"track",shuffle_enabled:1,updated_at:null};return json({queue_key:key,state,tracks:await queueRows(env.DB,key)},200,request);}
+if(path==="/api/queue/add"&&method==="POST"){const b=await request.json(),key=b.queue_key||env.DEFAULT_QUEUE_KEY||"default",t=b.track,id=await upsertTrack(env.DB,t);await env.DB.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES(?,?,?,1,?) ON CONFLICT(queue_key) DO NOTHING`).bind(key,0,"track",now()).run();const d=await env.DB.prepare(`SELECT id,position FROM queue_entries WHERE queue_key=? AND track_id=? LIMIT 1`).bind(key,id).first();if(d)return json({ok:true,track_id:id,queue_entry_id:Number(d.id),position:Number(d.position),duplicate:true},200,request);const m=await env.DB.prepare(`SELECT COALESCE(MAX(position),-1) p FROM queue_entries WHERE queue_key=?`).bind(key).first(),p=Number(m?.p??-1)+1,timestamp=now(),r=await env.DB.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES(?,?,?,?,?)`).bind(key,id,p,timestamp,timestamp).run();return json({ok:true,track_id:id,queue_entry_id:Number(r.meta.last_row_id),position:p},200,request);}
+const qm=path.match(/^\/api\/queue\/(\d+)$/);if(qm&&method==="DELETE"){await env.DB.prepare(`DELETE FROM queue_entries WHERE id=?`).bind(Number(qm[1])).run();return json({ok:true},200,request);}
+if(path==="/api/queue/next"&&method==="POST"){const key=url.searchParams.get("queue_key")||env.DEFAULT_QUEUE_KEY||"default",state=await env.DB.prepare(`SELECT queue_key,current_index,mode,shuffle_enabled FROM queue_state WHERE queue_key=?`).bind(key).first()||{current_index:0,mode:"track",shuffle_enabled:1};const rows=await queueRows(env.DB,key),next=rows.length?(Number(state.current_index)+1)%rows.length:0;await env.DB.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(queue_key) DO UPDATE SET current_index=excluded.current_index,mode=excluded.mode,shuffle_enabled=excluded.shuffle_enabled,updated_at=excluded.updated_at`).bind(key,next,state.mode||"track",Number(state.shuffle_enabled??1),now()).run();return json({ok:true,current_index:next},200,request);}
+if(path==="/api/queue/shuffle"&&method==="POST"){const b=await request.json(),key=b.queue_key||env.DEFAULT_QUEUE_KEY||"default",enabled=b.enabled?1:0,state=await env.DB.prepare(`SELECT current_index,mode FROM queue_state WHERE queue_key=?`).bind(key).first()||{current_index:0,mode:"track"};await env.DB.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(queue_key) DO UPDATE SET shuffle_enabled=excluded.shuffle_enabled,updated_at=excluded.updated_at`).bind(key,Number(state.current_index||0),state.mode||"track",enabled,now()).run();return json({ok:true,shuffle_enabled:enabled},200,request);}
+if(path==="/api/acquisition"&&method==="GET"){const n=Math.min(Math.max(Number(url.searchParams.get("limit")||20),1),100),r=await env.DB.prepare(`SELECT a.id,a.track_id,a.status,a.worker,a.attempts,a.error,a.created_at,a.updated_at,a.started_at,a.completed_at,t.title,t.artist,t.source_url FROM acquisition_jobs a JOIN tracks t ON t.id=a.track_id ORDER BY a.created_at DESC LIMIT ?`).bind(n).all();return json({jobs:r.results||[]},200,request);}
+if(path==="/api/acquisition"&&method==="POST"){const b=await request.json(),id=Number(b.track_id);if(!id)return error(request,"track_id is required");const result=await ensureAcquisition(env,id,b.priority||"normal",ctx);if(!result)return error(request,"Track not found",404);return json({ok:true,...result},202,request);}
+if(path==="/api/playback/mode"&&method==="POST"){const b=await request.json(),mode=String(b.mode||"").toLowerCase();if(!["track","album"].includes(mode))return error(request,"mode must be track or album");await env.DB.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES('default',0,?,1,?) ON CONFLICT(queue_key) DO UPDATE SET current_index=0,mode=excluded.mode,updated_at=excluded.updated_at`).bind(mode,now()).run();return json({ok:true,mode},200,request);}
+if(path==="/api/play/track"&&method==="POST"){const b=await request.json(),id=Number(b.track_id);if(!id)return error(request,"track_id is required");const track=await env.DB.prepare(`SELECT * FROM tracks WHERE id=?`).bind(id).first();if(!track)return error(request,"Track not found",404);await env.DB.prepare(`UPDATE tracks SET play_count=COALESCE(play_count,0)+1,updated_at=? WHERE id=?`).bind(now(),id).run();const acquisition=await ensureAcquisition(env,id,"high",ctx);return json({ok:true,track,acquisition},200,request);}
+if(path.startsWith("/api/play/album/")&&method==="POST"){const id=Number(path.split("/").pop());if(!id)return error(request,"album id is required");const tracks=await albumRows(env.DB,id);if(!tracks.length)return error(request,"Album not found",404);await env.DB.prepare(`DELETE FROM queue_entries WHERE queue_key='album-current'`).run();await env.DB.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES('album-current',0,'album',1,?) ON CONFLICT(queue_key) DO UPDATE SET current_index=0,mode='album',updated_at=excluded.updated_at`).bind(now()).run();for(let i=0;i<tracks.length;i++){const t=now();await env.DB.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES('album-current',?,?,?,?,?)`).bind(tracks[i].id,i,t,t).run();}await env.DB.prepare(`UPDATE albums SET updated_at=? WHERE id=?`).bind(now(),id).run();for(const track of tracks){await ensureAcquisition(env,Number(track.id),i===0?"high":"normal",ctx);}await ensureHistory(env.DB);await env.DB.prepare(`INSERT INTO album_play_history(album_id,album_name,artist,artwork_url,played_at) VALUES(?,?,?,?,?)`).bind(id,tracks[0].album_name,tracks[0].artist,tracks[0].artwork_url,now()).run();return json({ok:true,album_id:id,tracks},200,request);}
+if(path==="/api/albums/history"&&method==="GET"){await ensureHistory(env.DB);const r=await env.DB.prepare(`SELECT album_id AS id,album_name AS title,MAX(artist) AS artist,MAX(artwork_url) AS artwork_url,COUNT(*) AS plays,MAX(played_at) AS played_at FROM album_play_history GROUP BY album_id,album_name ORDER BY played_at DESC LIMIT 50`).all();return json({albums:r.results||[]},200,request);}
+if(path==="/api/export/tracks.csv"&&method==="GET"){const rows=await trackRows(env.DB,200000),csv=toCsv(rows);return new Response(csv,{status:200,headers:{"content-type":"text/csv; charset=utf-8","content-disposition":"attachment; filename=tracks.csv",...corsHeaders(request)}});}
+if(path==="/api/import/tracks.csv"&&method==="POST"){const rows=parseCsv(await request.text());let imported=0;for(const row of rows){try{await upsertTrack(env.DB,{...row,album_id:row.album_id?Number(row.album_id):null,duration_ms:row.duration_ms?Number(row.duration_ms):null,metadata_json:row.metadata_json||null});imported++;}catch(e){console.error("CSV row import failed",e);}}return json({ok:true,imported,total:rows.length},200,request);}
+if(path==="/api/data/delete"&&method==="POST"){const b=await request.json();if(b.confirm!=="DELETE")return error(request,"Confirmation required");await env.DB.batch([env.DB.prepare(`DELETE FROM queue_entries`),env.DB.prepare(`DELETE FROM playlist_entries`),env.DB.prepare(`DELETE FROM acquisition_jobs`),env.DB.prepare(`DELETE FROM album_play_history`),env.DB.prepare(`DELETE FROM tracks`),env.DB.prepare(`DELETE FROM albums`),env.DB.prepare(`DELETE FROM queue_state`)]);return json({ok:true},200,request);}
+return error(request,"Not found",404);
+}catch(e){console.error("API error",e);return error(request,e?.message||"Internal error",500);}}
+export default {fetch:handle,scheduled:async(controller,env)=>watchdog(env,"scheduled")};
