@@ -3,6 +3,7 @@
   "name": "dakshmusic3-test",
   "main": "worker/entry.js",
   "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["allow_custom_ports"],
   "observability": {
     "enabled": true
   },
