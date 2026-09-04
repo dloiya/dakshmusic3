@@ -12,8 +12,6 @@ function json(data, status = 200, extra = {}) {
 
 function corsHeaders(request) {
   const origin = request.headers.get("Origin");
-  // For this private app, echo the browser origin. If you later restrict the
-  // frontend hostname, replace this with an allow-list.
   return {
     "access-control-allow-origin": origin || "*",
     "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
@@ -152,6 +150,19 @@ async function queueState(db, queueKey) {
   );
 }
 
+async function ensureQueueState(db, queueKey) {
+  const t = now();
+  await db
+    .prepare(
+      `INSERT INTO queue_state
+       (queue_key, current_index, mode, shuffle_enabled, updated_at)
+       VALUES (?, 0, 'playlist', 1, ?)
+       ON CONFLICT(queue_key) DO NOTHING`
+    )
+    .bind(queueKey, t)
+    .run();
+}
+
 async function queueRows(db, queueKey) {
   const result = await db
     .prepare(
@@ -188,8 +199,6 @@ async function initializeQueue(db, queueKey) {
     return { created: false, count: existing.length };
   }
 
-  // Top cache: logical hot set derived from play_count.
-  // Pick 5 from the top 50 to keep the selection varied.
   const hot = await db
     .prepare(
       `SELECT id FROM tracks
@@ -211,7 +220,6 @@ async function initializeQueue(db, queueKey) {
     }
   }
 
-  // Fill the remaining 15 from the catalog, excluding selected tracks.
   const catalog = await db
     .prepare(
       `SELECT id FROM tracks
@@ -312,6 +320,11 @@ async function handle(request, env) {
       const key = body.queue_key || queueKey;
       const t = normalizeTrack(body.track);
       const trackId = await getOrCreateTrack(env.DB, t);
+
+      // Production D1 has a foreign-key relationship from queue_entries to
+      // queue_state. Make sure the parent queue row exists before inserting
+      // the child entry. This is especially important for a brand-new queue.
+      await ensureQueueState(env.DB, key);
 
       const duplicate = await env.DB
         .prepare(
