@@ -1,5 +1,5 @@
 -- Reference only.
--- This mirrors the existing DakshMusic3 D1 structure shown in the schema diagram.
+-- This mirrors the active DakshMusic3 D1 structure.
 -- Do NOT blindly apply this to production if the tables already exist.
 
 CREATE TABLE IF NOT EXISTS tracks (
@@ -74,24 +74,8 @@ CREATE TABLE IF NOT EXISTS cache_objects (
   updated_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS acquisition_jobs (
-  id TEXT PRIMARY KEY,
-  track_id INTEGER NOT NULL,
-  status TEXT,
-  worker TEXT,
-  attempts INTEGER DEFAULT 0,
-  error TEXT,
-  created_at TEXT,
-  updated_at TEXT,
-  started_at TEXT,
-  completed_at TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_tracks_source
   ON tracks(source, source_id);
 
 CREATE INDEX IF NOT EXISTS idx_queue_entries_key
   ON queue_entries(queue_key, position);
-
-CREATE INDEX IF NOT EXISTS idx_acquisition_status
-  ON acquisition_jobs(status, created_at);
