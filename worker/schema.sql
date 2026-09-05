@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS queue_state (
   updated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS acquisition_jobs (
+  id TEXT PRIMARY KEY,
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+  worker TEXT,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  storage_key TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS cache_objects (
   id INTEGER PRIMARY KEY,
   track_id INTEGER NOT NULL,
@@ -78,6 +93,9 @@ CREATE TABLE IF NOT EXISTS cache_objects (
 
 CREATE INDEX IF NOT EXISTS idx_tracks_source
   ON tracks(source, source_id);
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_acquisition_jobs_active_track
+  ON acquisition_jobs(track_id) WHERE status IN ('queued','running');
+CREATE INDEX IF NOT EXISTS idx_acquisition_jobs_track_created
+  ON acquisition_jobs(track_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_entries_key
   ON queue_entries(queue_key, position);
