@@ -96,11 +96,11 @@ Sets playback mode to `track` or `album`.
 
 ### POST /api/play/track
 
-Starts playback preparation for a track and schedules acquisition if the file is not already cached.
+Starts playback preparation for a track and dispatches acquisition if the file is not already cached. Acquisition status is not tracked or polled by the Worker API.
 
 ### POST /api/play/album/:albumId
 
-Creates the current album queue, records album history, and schedules acquisition for the album tracks.
+Creates the current album queue, records album history, and dispatches acquisition for the album tracks. Acquisition status is not tracked or polled by the Worker API.
 
 ## Queue
 
@@ -126,13 +126,9 @@ Sets shuffle state.
 
 ## Acquisition
 
-### GET /api/acquisition?limit=20
-
-Returns recent acquisition jobs.
-
 ### POST /api/acquisition
 
-Creates or reuses an acquisition job for a track. Acquisition is dispatched directly to the OCI retriever in the Worker background task; the HTTP request does not expose the retriever implementation to the frontend.
+Dispatches acquisition for a track to the OCI retriever. No acquisition job row is created and there is no status-polling endpoint.
 
 Request:
 
@@ -142,6 +138,8 @@ Request:
   "priority": "normal"
 }
 ```
+
+Response is `202 Accepted` when dispatch is queued with `status: "dispatched"`.
 
 ## Library import/export
 
@@ -155,7 +153,7 @@ Imports track rows from CSV.
 
 ### POST /api/data/delete
 
-Deletes library, queue, playlist, acquisition, and playback-history data after receiving `{ "confirm": "DELETE" }`.
+Deletes library, queue, playlist, and playback-history data after receiving `{ "confirm": "DELETE" }`.
 
 ## Error format
 
