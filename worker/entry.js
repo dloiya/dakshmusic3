@@ -41,6 +41,8 @@ function normalizeValue(value) {
 function wrapStatement(statement, statementMap) {
   const proxy = new Proxy(statement, {
     get(target, property) {
+      if (property === "__dakshmusic3Raw") return target;
+
       const value = target[property];
 
       if (property === "bind") {
@@ -59,6 +61,16 @@ function wrapStatement(statement, statementMap) {
   return proxy;
 }
 
+function unwrapStatement(statement) {
+  let current = statement;
+  for (let i = 0; i < 4; i++) {
+    const raw = current?.__dakshmusic3Raw;
+    if (!raw || raw === current) return current;
+    current = raw;
+  }
+  return current;
+}
+
 function wrapDb(db) {
   if (!db) return db;
 
@@ -71,7 +83,7 @@ function wrapDb(db) {
 
       if (property === "batch") {
         return async (statements) => {
-          const raw = statements.map((statement) => statementMap.get(statement) || statement);
+          const raw = statements.map((statement) => unwrapStatement(statementMap.get(statement) || statement));
           return target.batch(raw);
         };
       }
