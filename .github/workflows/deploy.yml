@@ -30,12 +30,6 @@ jobs:
         env:
           VITE_QUEUE_API_URL: ${{ vars.VITE_QUEUE_API_URL || '' }}
 
-      - name: List Queues
-        run: npx wrangler queues list
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
