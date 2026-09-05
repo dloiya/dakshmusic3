@@ -21,17 +21,21 @@ function json(data, status = 200, request = null, extra = {}) {
   });
 }
 
-function error(request, message, status = 400) {
-  return json({ error: message }, status, request);
+function error(request, message, status = 400, extra = {}) {
+  return json({ error: message }, status, request, extra);
 }
 
-function shouldRetry(err, attempt) {
+function isTransientD1Error(err) {
   const msg = String(err?.message || err);
-  return attempt <= 5 && (
+  return (
     msg.includes("Network connection lost") ||
     msg.includes("storage caused object to be reset") ||
     msg.includes("reset because its code was updated")
   );
+}
+
+function shouldRetry(err, attempt) {
+  return attempt <= 9 && isTransientD1Error(err);
 }
 
 async function withD1Retry(fn) {
@@ -40,7 +44,7 @@ async function withD1Retry(fn) {
       return await fn();
     } catch (err) {
       if (!shouldRetry(err, attempt)) throw err;
-      const delay = Math.min(1000 * 2 ** attempt, 8000) + Math.random() * 200;
+      const delay = Math.min(1000 * 2 ** attempt, 8000) + Math.random() * 500;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -534,6 +538,14 @@ async function handle(request, env, ctx) {
     return error(request,"Not found",404);
   } catch (err) {
     console.error("API error",err);
+    if (isTransientD1Error(err)) {
+      return error(
+        request,
+        "Temporary database outage. Please retry.",
+        503,
+        { "retry-after": "60" }
+      );
+    }
     return error(request,err?.message||"Internal error",500);
   }
 }
