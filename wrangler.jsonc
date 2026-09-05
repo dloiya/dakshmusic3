@@ -4,21 +4,15 @@
   "main": "worker/entry.js",
   "compatibility_date": "2026-08-29",
   "compatibility_flags": ["allow_custom_ports"],
-  "observability": {
-    "enabled": true
-  },
-  "build": {
-    "command": "npm run build"
-  },
+  "observability": { "enabled": true },
+  "build": { "command": "npm run build" },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
-  "triggers": {
-    "crons": ["*/2 * * * *"]
-  },
+  "triggers": { "crons": ["*/2 * * * *"] },
   "vars": {
     "DEFAULT_QUEUE_KEY": "default",
     "OCI_API_URL": "http://137-23-48-247.sslip.io:8787"
@@ -27,7 +21,13 @@
     {
       "binding": "DB",
       "database_name": "dakshmusic3",
-      "database_id": "3f384751-424c-4628-ac18-384c068afd8b"
+      "database_id": "3f384751-424c-4628-ac18-384c068afd13"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIO_BUCKET",
+      "bucket_name": "dakshmusic3-audio"
     }
   ]
 }
