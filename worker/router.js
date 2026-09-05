@@ -129,15 +129,33 @@ async function callRetriever(env, track, priority = "normal") {
 
 // Acquisition is fire-and-forget. The Worker does not create or poll
 // acquisition_jobs; the retriever owns acquisition state.
+// The atomic claim prevents duplicate OCI dispatches when play/retry requests
+// for the same track arrive close together.
 async function dispatchAcquisition(db, env, trackId, priority = "normal", ctx = null) {
+  const id = Number(trackId);
   const track = await db.prepare(`
     SELECT id,title,artist,album_name,source_url,storage_key,storage_status
     FROM tracks WHERE id=?
-  `).bind(Number(trackId)).first();
+  `).bind(id).first();
 
   if (!track) return null;
   if (track.storage_status === "ready" && track.storage_key) {
-    return { ready: true, track_id: Number(track.id) };
+    return { ready: true, track_id: id };
+  }
+  if (track.storage_status === "downloading") {
+    return { track_id: id, status: "already-dispatched", priority };
+  }
+
+  const claimed = await db.prepare(`
+    UPDATE tracks
+    SET storage_status='downloading',cache_requested=1,updated_at=?
+    WHERE id=? AND COALESCE(storage_status,'missing') NOT IN ('downloading','ready')
+  `).bind(now(), id).run();
+
+  if (!Number(claimed.meta?.changes || 0)) {
+    const fresh = await db.prepare(`SELECT storage_status,storage_key FROM tracks WHERE id=?`).bind(id).first();
+    if (fresh?.storage_status === "ready" && fresh.storage_key) return { ready: true, track_id: id };
+    return { track_id: id, status: "already-dispatched", priority };
   }
 
   const run = async () => {
@@ -154,19 +172,13 @@ async function dispatchAcquisition(db, env, trackId, priority = "normal", ctx = 
           UPDATE tracks
           SET storage_key=?,storage_status='ready',cache_requested=1,updated_at=?
           WHERE id=?
-        `).bind(String(storageKey), now(), Number(track.id)).run();
-      } else {
-        await db.prepare(`
-          UPDATE tracks
-          SET storage_status='downloading',cache_requested=1,updated_at=?
-          WHERE id=?
-        `).bind(now(), Number(track.id)).run();
+        `).bind(String(storageKey), now(), id).run();
       }
     } catch (err) {
-      console.error("OCI retriever acquisition failed", track.id, err);
+      console.error("OCI retriever acquisition failed", id, err);
       await db.prepare(`
         UPDATE tracks SET storage_status='failed',updated_at=? WHERE id=?
-      `).bind(now(), Number(track.id)).run().catch((dbErr) => {
+      `).bind(now(), id).run().catch((dbErr) => {
         console.error("Failed to persist acquisition error state", dbErr);
       });
     }
@@ -174,7 +186,7 @@ async function dispatchAcquisition(db, env, trackId, priority = "normal", ctx = 
 
   if (ctx) ctx.waitUntil(run());
   else await run();
-  return { track_id: Number(track.id), status: "dispatched", priority };
+  return { track_id: id, status: "dispatched", priority };
 }
 
 async function deezerSearch(request) {
@@ -437,6 +449,25 @@ async function handle(request, env, ctx) {
       const r = await db.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES(?,?,?,?,?)`).bind(key,id,p,timestamp,timestamp).run();
       return json({ok:true,track_id:id,queue_entry_id:Number(r.meta.last_row_id),position:p},200,request);
     }
+    if (path === "/api/queue/replace" && method === "POST") {
+      const b = await request.json();
+      const key = String(b.queue_key || env.DEFAULT_QUEUE_KEY || "default");
+      const ids = [...new Set((Array.isArray(b.track_ids) ? b.track_ids : []).map(Number).filter(Number.isInteger))];
+      if (!ids.length) return error(request,"track_ids must contain at least one track id");
+
+      const statements = [
+        db.prepare(`DELETE FROM queue_entries WHERE queue_key=?`).bind(key),
+        db.prepare(`INSERT INTO queue_state(queue_key,current_index,mode,shuffle_enabled,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(queue_key) DO UPDATE SET current_index=0,updated_at=excluded.updated_at`).bind(key,0,"track",1,now()),
+      ];
+      for (let i=0;i<ids.length;i++) {
+        statements.push(db.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES(?,?,?,?,?)`).bind(key,ids[i],i,now(),now()));
+        if (statements.length >= 102) {
+          await db.batch(statements.splice(0, statements.length));
+        }
+      }
+      if (statements.length) await db.batch(statements);
+      return json({ok:true,queue_key:key,count:ids.length},200,request);
+    }
     const qm = path.match(/^\/api\/queue\/(\d+)$/);
     if (qm && method === "DELETE") {
       await db.prepare(`DELETE FROM queue_entries WHERE id=?`).bind(Number(qm[1])).run();
@@ -496,7 +527,7 @@ async function handle(request, env, ctx) {
       }
       statements.push(db.prepare(`UPDATE albums SET updated_at=? WHERE id=?`).bind(now(),id));
       await db.batch(statements);
-      for (let i=0;i<tracks.length;i++) await dispatchAcquisition(db,env,Number(tracks[i].id),i===0?"high":"normal",ctx);
+      if (tracks[0]) await dispatchAcquisition(db,env,Number(tracks[0].id),"high",ctx);
       await ensureHistory(db);
       await db.prepare(`INSERT INTO album_play_history(album_id,album_name,artist,artwork_url,played_at) VALUES(?,?,?,?,?)`).bind(id,tracks[0].album_name,tracks[0].artist,tracks[0].artwork_url,now()).run();
       return json({ok:true,album_id:id,tracks},200,request);
@@ -527,7 +558,6 @@ async function handle(request, env, ctx) {
       await db.batch([
         db.prepare(`DELETE FROM queue_entries`),
         db.prepare(`DELETE FROM playlist_entries`),
-        db.prepare(`DELETE FROM acquisition_jobs`),
         db.prepare(`DELETE FROM album_play_history`),
         db.prepare(`DELETE FROM tracks`),
         db.prepare(`DELETE FROM albums`),
