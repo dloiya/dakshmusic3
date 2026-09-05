@@ -1,26 +1,5 @@
 import router from "./router.js";
 
-/**
- * Keep the Worker API compatible with the existing D1 storage_status enum.
- *
- * D1 accepts only: missing, queued, available, failed.
- * Older router/frontend code uses: missing, downloading, ready, failed.
- * Translate SQL writes to the real enum and normalize returned rows back to
- * the API vocabulary expected by the UI.
- */
-const DB_STATUS_WRITE = [
-  [/'downloading'/g, "'queued'"],
-  [/'ready'/g, "'available'"],
-];
-
-function rewriteSql(sql) {
-  let value = String(sql);
-  for (const [pattern, replacement] of DB_STATUS_WRITE) {
-    value = value.replace(pattern, replacement);
-  }
-  return value;
-}
-
 function normalizeValue(value) {
   if (Array.isArray(value)) return value.map(normalizeValue);
   if (!value || typeof value !== "object") return value;
@@ -38,15 +17,13 @@ function normalizeValue(value) {
   return out;
 }
 
-function wrapStatement(statement, statementMap) {
-  const proxy = new Proxy(statement, {
+function wrapStatement(statement) {
+  return new Proxy(statement, {
     get(target, property) {
-      if (property === "__dakshmusic3Raw") return target;
-
       const value = target[property];
 
       if (property === "bind") {
-        return (...args) => wrapStatement(value.apply(target, args), statementMap);
+        return (...args) => wrapStatement(value.apply(target, args));
       }
 
       if (["run", "first", "all", "raw"].includes(property)) {
@@ -57,34 +34,21 @@ function wrapStatement(statement, statementMap) {
       return value.bind(target);
     },
   });
-  statementMap.set(proxy, statement);
-  return proxy;
-}
-
-function unwrapStatement(statement) {
-  let current = statement;
-  for (let i = 0; i < 4; i++) {
-    const raw = current?.__dakshmusic3Raw;
-    if (!raw || raw === current) return current;
-    current = raw;
-  }
-  return current;
 }
 
 function wrapDb(db) {
   if (!db) return db;
 
-  const statementMap = new WeakMap();
-  const proxy = new Proxy(db, {
+  return new Proxy(db, {
     get(target, property) {
       if (property === "prepare") {
-        return (sql) => wrapStatement(target.prepare(rewriteSql(sql)), statementMap);
+        return (sql) => wrapStatement(target.prepare(sql));
       }
 
       if (property === "batch") {
         return async (statements) => {
-          const raw = statements.map((statement) => unwrapStatement(statementMap.get(statement) || statement));
-          return target.batch(raw);
+          const raw = statements.map((statement) => statement?.__dakshmusic3Raw || statement);
+          return normalizeValue(await target.batch(raw));
         };
       }
 
@@ -93,8 +57,6 @@ function wrapDb(db) {
       return value.bind(target);
     },
   });
-
-  return proxy;
 }
 
 function adaptEnv(env) {
