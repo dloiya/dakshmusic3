@@ -127,10 +127,6 @@ async function callRetriever(env, track, priority = "normal") {
   return { ok: upstream.ok, status: upstream.status, data };
 }
 
-// Acquisition is fire-and-forget. The Worker does not create or poll
-// acquisition_jobs; the retriever owns acquisition state.
-// The atomic claim prevents duplicate OCI dispatches when play/retry requests
-// for the same track arrive close together.
 async function dispatchAcquisition(db, env, trackId, priority = "normal", ctx = null) {
   const id = Number(trackId);
   const track = await db.prepare(`
@@ -139,22 +135,22 @@ async function dispatchAcquisition(db, env, trackId, priority = "normal", ctx = 
   `).bind(id).first();
 
   if (!track) return null;
-  if (track.storage_status === "ready" && track.storage_key) {
+  if (track.storage_status === "available" && track.storage_key) {
     return { ready: true, track_id: id };
   }
-  if (track.storage_status === "downloading") {
+  if (track.storage_status === "queued") {
     return { track_id: id, status: "already-dispatched", priority };
   }
 
   const claimed = await db.prepare(`
     UPDATE tracks
-    SET storage_status='downloading',cache_requested=1,updated_at=?
-    WHERE id=? AND COALESCE(storage_status,'missing') NOT IN ('downloading','ready')
+    SET storage_status='queued',cache_requested=1,updated_at=?
+    WHERE id=? AND COALESCE(storage_status,'missing') NOT IN ('queued','available')
   `).bind(now(), id).run();
 
   if (!Number(claimed.meta?.changes || 0)) {
     const fresh = await db.prepare(`SELECT storage_status,storage_key FROM tracks WHERE id=?`).bind(id).first();
-    if (fresh?.storage_status === "ready" && fresh.storage_key) return { ready: true, track_id: id };
+    if (fresh?.storage_status === "available" && fresh.storage_key) return { ready: true, track_id: id };
     return { track_id: id, status: "already-dispatched", priority };
   }
 
@@ -170,7 +166,7 @@ async function dispatchAcquisition(db, env, trackId, priority = "normal", ctx = 
       if (storageKey) {
         await db.prepare(`
           UPDATE tracks
-          SET storage_key=?,storage_status='ready',cache_requested=1,updated_at=?
+          SET storage_key=?,storage_status='available',cache_requested=1,updated_at=?
           WHERE id=?
         `).bind(String(storageKey), now(), id).run();
       }
@@ -222,7 +218,7 @@ async function upsertTrack(db, t) {
     throw new Error("title, artist, source, source_id and source_url are required");
   }
 
-  const albumId = t.album_id == null ? null : Number(t.album_id);
+  const requestedAlbumId = t.album_id == null ? null : Number(t.album_id);
   const albumName = t.album_name || null;
   const source = String(t.source);
   const sourceId = String(t.source_id);
@@ -234,27 +230,61 @@ async function upsertTrack(db, t) {
   const artist = String(t.artist);
   const ts = now();
 
-  if (albumId != null) {
-    await db.prepare(`
-      INSERT INTO albums(id,title,artist,source,source_id,artwork_url,year,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,NULL,?,?)
-      ON CONFLICT(id) DO UPDATE SET
-        title=excluded.title,
-        artist=excluded.artist,
-        source=excluded.source,
-        source_id=excluded.source_id,
-        artwork_url=excluded.artwork_url,
-        updated_at=excluded.updated_at
-    `).bind(albumId, albumName || "Unknown Album", artist, source, String(albumId), artwork, ts, ts).run();
+  let albumId = requestedAlbumId;
+
+  if (requestedAlbumId != null) {
+    const existingAlbum = await db.prepare(
+      `SELECT id FROM albums WHERE source=? AND source_id=? LIMIT 1`
+    ).bind(source, String(requestedAlbumId)).first();
+
+    if (existingAlbum) {
+      albumId = Number(existingAlbum.id);
+      await db.prepare(`
+        UPDATE albums SET title=?,artist=?,artwork_url=?,updated_at=? WHERE id=?
+      `).bind(albumName || "Unknown Album", artist, artwork, ts, albumId).run();
+    } else {
+      const existingAlbumById = await db.prepare(
+        `SELECT id,source,source_id FROM albums WHERE id=? LIMIT 1`
+      ).bind(requestedAlbumId).first();
+
+      if (existingAlbumById) {
+        albumId = Number(existingAlbumById.id);
+        await db.prepare(`
+          UPDATE albums SET title=?,artist=?,source=?,source_id=?,artwork_url=?,updated_at=? WHERE id=?
+        `).bind(albumName || "Unknown Album", artist, source, String(requestedAlbumId), artwork, ts, albumId).run();
+      } else {
+        await db.prepare(`
+          INSERT INTO albums(id,title,artist,source,source_id,artwork_url,year,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,NULL,?,?)
+        `).bind(requestedAlbumId, albumName || "Unknown Album", artist, source, String(requestedAlbumId), artwork, ts, ts).run();
+      }
+    }
   }
 
-  const existing = await db.prepare(`SELECT id FROM tracks WHERE source=? AND source_id=? LIMIT 1`).bind(source, sourceId).first();
-  if (existing) {
+  const existingBySource = await db.prepare(
+    `SELECT id FROM tracks WHERE source=? AND source_id=? LIMIT 1`
+  ).bind(source, sourceId).first();
+
+  if (existingBySource) {
     await db.prepare(`
       UPDATE tracks SET title=?,artist=?,album_id=?,album_name=?,source_url=?,isrc=?,
       duration_ms=?,artwork_url=?,metadata_json=?,updated_at=? WHERE id=?
-    `).bind(title, artist, albumId, albumName, sourceUrl, t.isrc || null, duration, artwork, metadata, ts, existing.id).run();
-    return Number(existing.id);
+    `).bind(title, artist, albumId, albumName, sourceUrl, t.isrc || null, duration, artwork, metadata, ts, existingBySource.id).run();
+    return Number(existingBySource.id);
+  }
+
+  const existingByIdentity = await db.prepare(`
+    SELECT id FROM tracks
+    WHERE title=? AND artist=? AND album_name IS ?
+    LIMIT 1
+  `).bind(title, artist, albumName).first();
+
+  if (existingByIdentity) {
+    await db.prepare(`
+      UPDATE tracks SET album_id=?,source=?,source_id=?,source_url=?,isrc=?,
+      duration_ms=?,artwork_url=?,metadata_json=?,updated_at=? WHERE id=?
+    `).bind(albumId, source, sourceId, sourceUrl, t.isrc || null, duration, artwork, metadata, ts, existingByIdentity.id).run();
+    return Number(existingByIdentity.id);
   }
 
   const r = await db.prepare(`
@@ -523,7 +553,7 @@ async function handle(request, env, ctx) {
       ];
       for (let i=0;i<tracks.length;i++) {
         const t=now();
-        statements.push(db.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES('album-current',?,?,?,?,?)`).bind(tracks[i].id,i,t,t));
+        statements.push(db.prepare(`INSERT INTO queue_entries(queue_key,track_id,position,added_at,updated_at) VALUES('album-current',?,?,?,?)`).bind(tracks[i].id,i,t,t));
       }
       statements.push(db.prepare(`UPDATE albums SET updated_at=? WHERE id=?`).bind(now(),id));
       await db.batch(statements);
@@ -580,4 +610,14 @@ async function handle(request, env, ctx) {
   }
 }
 
-export default { fetch:handle, scheduled:async(controller,env)=>watchdog(env,"scheduled") };
+export default {
+  fetch: handle,
+  scheduled: async (controller, env, ctx) => {
+    try {
+      return await watchdog(env, "scheduled");
+    } catch (err) {
+      console.error("Scheduled watchdog failed", err);
+      return undefined;
+    }
+  },
+};
