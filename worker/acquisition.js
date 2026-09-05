@@ -59,6 +59,19 @@ async function ensureAcquisitionJobs(db) {
       completed_at TEXT
     )
   `).run());
+
+  // Existing databases may have been created from an older version of this
+  // table without priority. CREATE TABLE IF NOT EXISTS does not alter them,
+  // so repair that schema in-place before any SELECT/INSERT references it.
+  const columns = await d1(() => db.prepare(`PRAGMA table_info(acquisition_jobs)`).all());
+  const hasPriority = (columns.results || []).some((column) => column.name === "priority");
+  if (!hasPriority) {
+    await d1(() => db.prepare(`
+      ALTER TABLE acquisition_jobs
+      ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'
+    `).run());
+  }
+
   await d1(() => db.prepare(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_acquisition_jobs_active_track
     ON acquisition_jobs(track_id) WHERE status IN ('queued','running')
