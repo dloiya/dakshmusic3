@@ -15,12 +15,13 @@ CREATE TABLE IF NOT EXISTS tracks (
   duration_ms INTEGER,
   artwork_url TEXT,
   storage_key TEXT,
-  storage_status TEXT,
+  storage_status TEXT CHECK(storage_status IN ('missing','queued','available','failed')),
   play_count INTEGER DEFAULT 0,
   cache_requested INTEGER DEFAULT 0,
   created_at TEXT,
   updated_at TEXT,
-  metadata_json TEXT
+  metadata_json TEXT,
+  UNIQUE(title, artist, album_name)
 );
 
 CREATE TABLE IF NOT EXISTS albums (
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS albums (
   artwork_url TEXT,
   year INTEGER,
   created_at TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  UNIQUE(source, source_id)
 );
 
 CREATE TABLE IF NOT EXISTS playlist_entries (
