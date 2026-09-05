@@ -60,15 +60,23 @@ async function ensureAcquisitionJobs(db) {
     )
   `).run());
 
-  // Existing databases may have been created from an older version of this
-  // table without priority. CREATE TABLE IF NOT EXISTS does not alter them,
-  // so repair that schema in-place before any SELECT/INSERT references it.
+  // Existing D1 databases can have an older acquisition_jobs schema.
+  // CREATE TABLE IF NOT EXISTS does not alter an existing table, so repair
+  // missing columns in-place before any queries reference them.
   const columns = await d1(() => db.prepare(`PRAGMA table_info(acquisition_jobs)`).all());
-  const hasPriority = (columns.results || []).some((column) => column.name === "priority");
-  if (!hasPriority) {
+  const names = new Set((columns.results || []).map((column) => column.name));
+
+  if (!names.has("priority")) {
     await d1(() => db.prepare(`
       ALTER TABLE acquisition_jobs
       ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'
+    `).run());
+  }
+
+  if (!names.has("storage_key")) {
+    await d1(() => db.prepare(`
+      ALTER TABLE acquisition_jobs
+      ADD COLUMN storage_key TEXT
     `).run());
   }
 
