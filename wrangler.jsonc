@@ -15,7 +15,7 @@
   "triggers": { "crons": ["*/2 * * * *"] },
   "vars": {
     "DEFAULT_QUEUE_KEY": "default",
-    "OCI_API_URL": "http://137-23-48-247.sslip.io:8787"
+    "OCI_API_URL": "http://137-23-48-247.sslip.io:8000"
   },
   "d1_databases": [
     {
