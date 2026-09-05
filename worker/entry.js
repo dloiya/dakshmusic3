@@ -38,13 +38,13 @@ function normalizeValue(value) {
   return out;
 }
 
-function wrapStatement(statement, rawStatements) {
-  return new Proxy(statement, {
+function wrapStatement(statement, statementMap) {
+  const proxy = new Proxy(statement, {
     get(target, property) {
       const value = target[property];
 
       if (property === "bind") {
-        return (...args) => wrapStatement(value.apply(target, args), rawStatements);
+        return (...args) => wrapStatement(value.apply(target, args), statementMap);
       }
 
       if (["run", "first", "all", "raw"].includes(property)) {
@@ -55,22 +55,18 @@ function wrapStatement(statement, rawStatements) {
       return value.bind(target);
     },
   });
+  statementMap.set(proxy, statement);
+  return proxy;
 }
 
 function wrapDb(db) {
-  if (!db || db.__dakshmusic3StatusAdapter) return db;
+  if (!db) return db;
 
   const statementMap = new WeakMap();
   const proxy = new Proxy(db, {
     get(target, property) {
-      if (property === "__dakshmusic3StatusAdapter") return true;
-
       if (property === "prepare") {
-        return (sql) => {
-          const statement = target.prepare(rewriteSql(sql));
-          statementMap.set(statement, statement);
-          return wrapStatement(statement, statementMap);
-        };
+        return (sql) => wrapStatement(target.prepare(rewriteSql(sql)), statementMap);
       }
 
       if (property === "batch") {
